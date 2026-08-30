@@ -21,12 +21,16 @@ class OpenAICompatibleClient:
         api_key: str,
         base_url: str,
         model: str,
+        provider: str = "openai",
+        deepseek_thinking: bool = True,
         timeout: float = 120.0,
         max_retries: int = 2,
     ):
         self.api_key = api_key
         self.endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self.model = model
+        self.provider = provider
+        self.deepseek_thinking = deepseek_thinking
         self.timeout = timeout
         self.max_retries = max_retries
 
@@ -39,8 +43,15 @@ class OpenAICompatibleClient:
             "model": self.model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": "auto",
         }
+        if self.provider == "deepseek":
+            payload["thinking"] = {
+                "type": "enabled" if self.deepseek_thinking else "disabled"
+            }
+            if not self.deepseek_thinking:
+                payload["tool_choice"] = "auto"
+        else:
+            payload["tool_choice"] = "auto"
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.endpoint,
@@ -104,4 +115,3 @@ class OpenAICompatibleClient:
             finish_reason=choice.get("finish_reason"),
             raw_message=message,
         )
-

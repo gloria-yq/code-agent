@@ -116,9 +116,23 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=模型名称
 ```
 
-程序只读取上述三个白名单配置项，且系统环境变量优先于 `.env`。`.env` 已被 Git 忽略，文件工具也会主动隐藏并拒绝读取该文件。真实密钥不得提交到仓库、写入文档或出现在公开日志中。
+程序只读取白名单配置项，且系统环境变量优先于 `.env`。`.env` 已被 Git 忽略，文件工具也会主动隐藏并拒绝读取该文件。真实密钥不得提交到仓库、写入文档或出现在公开日志中。
 
-如使用其他 OpenAI 兼容服务，请修改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`。基础地址应指向服务的 `/v1` 根路径，程序会自动追加 `/chat/completions`。
+如使用其他 OpenAI 兼容服务，请修改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`。基础地址应指向服务公布的 API 根路径，程序会自动追加 `/chat/completions`。
+
+### DeepSeek 官方 API
+
+DeepSeek 使用 OpenAI 兼容的 Chat Completions 消息与工具格式，但思考模式还有额外要求。项目内置 `deepseek` 兼容模式，会保留并回传 `reasoning_content`；启用思考模式时不会发送 DeepSeek 不接受的 `tool_choice` 字段。
+
+```env
+CODE_AGENT_PROVIDER=deepseek
+DEEPSEEK_API_KEY=你的密钥
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_THINKING=enabled
+```
+
+使用 DeepSeek 官方地址或只设置 `DEEPSEEK_API_KEY` 时，默认的 `auto` 模式也会自动识别。若所用模型或兼容网关不支持思考模式，可设置 `DEEPSEEK_THINKING=disabled`。也可以继续使用 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL` 指向 DeepSeek，但显式使用 `DEEPSEEK_*` 更容易辨认。
 
 ## 运行方法
 
@@ -146,6 +160,8 @@ python -m code_agent --workspace ../sample-project "完成指定编程任务"
 --workspace PATH
 --model MODEL
 --base-url URL
+--provider {auto,openai,deepseek}
+--deepseek-thinking {enabled,disabled}
 --max-turns N
 --approval-mode {suggest,auto-edit,full}
 --no-session-log

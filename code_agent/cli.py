@@ -26,7 +26,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("task", nargs="?", help="Programming task; prompted interactively if omitted")
     parser.add_argument("--workspace", default=".", help="Directory the agent may access")
     parser.add_argument("--model", help="Model name; defaults to OPENAI_MODEL")
-    parser.add_argument("--base-url", help="OpenAI-compatible /v1 base URL")
+    parser.add_argument("--base-url", help="OpenAI-compatible API base URL")
+    parser.add_argument(
+        "--provider",
+        choices=("auto", "openai", "deepseek"),
+        help="Compatibility mode; auto detects the official DeepSeek endpoint",
+    )
+    parser.add_argument(
+        "--deepseek-thinking",
+        choices=("enabled", "disabled"),
+        help="DeepSeek thinking mode; defaults to enabled",
+    )
     parser.add_argument("--max-turns", type=int, default=24)
     parser.add_argument(
         "--approval-mode",
@@ -67,6 +77,8 @@ def main(argv: list[str] | None = None) -> int:
             args.workspace,
             model=args.model,
             base_url=args.base_url,
+            provider=args.provider,
+            deepseek_thinking=args.deepseek_thinking,
             max_turns=args.max_turns,
             approval_mode=args.approval_mode,
         )
@@ -91,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
                 api_key=config.api_key,
                 base_url=config.base_url,
                 model=config.model,
+                provider=config.provider,
+                deepseek_thinking=config.deepseek_thinking,
                 timeout=config.request_timeout,
             ),
             tools=registry,
@@ -106,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Workspace: {config.workspace}")
         print(f"Model: {config.model}")
+        print(f"Provider compatibility: {config.provider}")
         print(f"Approval mode: {config.approval_mode}\n")
         result = agent.run(task or "", build_system_prompt(config.workspace))
         if result.final_text:
@@ -127,4 +142,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

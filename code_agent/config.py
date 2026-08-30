@@ -5,10 +5,20 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .errors import ConfigurationError
 
-_ALLOWED_ENV_FILE_KEYS = {"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"}
+_ALLOWED_ENV_FILE_KEYS = {
+    "CODE_AGENT_PROVIDER",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL",
+    "DEEPSEEK_THINKING",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+}
 
 
 def load_untracked_env(path: Path) -> None:
@@ -29,7 +39,7 @@ def load_untracked_env(path: Path) -> None:
         key = key.strip()
         if not separator or key not in _ALLOWED_ENV_FILE_KEYS:
             raise ConfigurationError(
-                f"Unsupported entry in {path.name} line {line_number}; only OpenAI settings are allowed"
+                f"Unsupported entry in {path.name} line {line_number}; only model settings are allowed"
             )
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
@@ -43,6 +53,8 @@ class AgentConfig:
     base_url: str
     model: str
     workspace: Path
+    provider: str = "openai"
+    deepseek_thinking: bool = True
     max_turns: int = 24
     max_consecutive_errors: int = 3
     request_timeout: float = 120.0
@@ -58,6 +70,8 @@ class AgentConfig:
         *,
         model: str | None = None,
         base_url: str | None = None,
+        provider: str | None = None,
+        deepseek_thinking: str | None = None,
         max_turns: int = 24,
         approval_mode: str = "auto-edit",
     ) -> "AgentConfig":
@@ -66,16 +80,51 @@ class AgentConfig:
             raise ConfigurationError(f"Workspace is not a directory: {root}")
         load_untracked_env(root / ".env")
 
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        provider_setting = (provider or os.getenv("CODE_AGENT_PROVIDER", "auto")).strip().lower()
+        if provider_setting not in {"auto", "openai", "deepseek"}:
+            raise ConfigurationError("provider must be auto, openai, or deepseek.")
+
+        candidate_base_url = (
+            base_url
+            or os.getenv("OPENAI_BASE_URL")
+            or os.getenv("DEEPSEEK_BASE_URL")
+            or "https://api.openai.com/v1"
+        ).strip()
+        host = (urlparse(candidate_base_url).hostname or "").lower()
+        inferred_deepseek = host == "api.deepseek.com" or (
+            bool(os.getenv("DEEPSEEK_API_KEY")) and not os.getenv("OPENAI_API_KEY")
+        )
+        resolved_provider = (
+            "deepseek" if provider_setting == "auto" and inferred_deepseek else provider_setting
+        )
+        if resolved_provider == "auto":
+            resolved_provider = "openai"
+
+        if resolved_provider == "deepseek":
+            api_key = (os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
+            chosen_model = (
+                model
+                or os.getenv("DEEPSEEK_MODEL")
+                or os.getenv("OPENAI_MODEL")
+                or "deepseek-v4-flash"
+            ).strip()
+            chosen_base_url = (
+                base_url
+                or os.getenv("DEEPSEEK_BASE_URL")
+                or os.getenv("OPENAI_BASE_URL")
+                or "https://api.deepseek.com"
+            ).strip()
+        else:
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            chosen_model = (model or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")).strip()
+            chosen_base_url = (
+                base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            ).strip()
         if not api_key:
             raise ConfigurationError(
-                "OPENAI_API_KEY is not set. Export it in your shell; never put it in the repository."
+                "No model API key is set. Export OPENAI_API_KEY or DEEPSEEK_API_KEY; "
+                "never put it in the repository."
             )
-
-        chosen_model = (model or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")).strip()
-        chosen_base_url = (
-            base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        ).strip()
         if not chosen_model:
             raise ConfigurationError("The model name cannot be empty.")
         if not chosen_base_url.startswith(("http://", "https://")):
@@ -84,12 +133,19 @@ class AgentConfig:
             raise ConfigurationError("max_turns must be at least 1.")
         if approval_mode not in {"suggest", "auto-edit", "full"}:
             raise ConfigurationError("approval_mode must be suggest, auto-edit, or full.")
+        thinking_setting = (
+            deepseek_thinking or os.getenv("DEEPSEEK_THINKING", "enabled")
+        ).strip().lower()
+        if thinking_setting not in {"enabled", "disabled"}:
+            raise ConfigurationError("DEEPSEEK_THINKING must be enabled or disabled.")
 
         return cls(
             api_key=api_key,
             base_url=chosen_base_url.rstrip("/"),
             model=chosen_model,
             workspace=root,
+            provider=resolved_provider,
+            deepseek_thinking=thinking_setting == "enabled",
             max_turns=max_turns,
             approval_mode=approval_mode,
         )

@@ -33,7 +33,32 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     AgentConfig.from_env(directory)
 
+    def test_auto_detects_deepseek_and_uses_provider_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "DEEPSEEK_API_KEY": "deepseek-key",
+                "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+                "DEEPSEEK_MODEL": "deepseek-v4-pro",
+                "DEEPSEEK_THINKING": "disabled",
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                config = AgentConfig.from_env(directory)
+            self.assertEqual(config.provider, "deepseek")
+            self.assertEqual(config.api_key, "deepseek-key")
+            self.assertEqual(config.model, "deepseek-v4-pro")
+            self.assertFalse(config.deepseek_thinking)
+
+    def test_rejects_invalid_deepseek_thinking_setting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "CODE_AGENT_PROVIDER": "deepseek",
+                "DEEPSEEK_API_KEY": "deepseek-key",
+                "DEEPSEEK_THINKING": "sometimes",
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                with self.assertRaises(ConfigurationError):
+                    AgentConfig.from_env(directory)
+
 
 if __name__ == "__main__":
     unittest.main()
-

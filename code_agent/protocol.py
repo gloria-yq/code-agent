@@ -22,6 +22,9 @@ class ModelReply:
 
     def as_assistant_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content or None}
+        reasoning_content = self.raw_message.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            message["reasoning_content"] = reasoning_content
         if self.tool_calls:
             message["tool_calls"] = [
                 {
@@ -32,4 +35,3 @@ class ModelReply:
                 for call in self.tool_calls
             ]
         return message
-
