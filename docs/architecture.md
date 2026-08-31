@@ -2,9 +2,11 @@
 
 ## Control loop
 
-`CodingAgent.run` owns the only agent loop. It starts with one system message and one user
-message. Each iteration derives a bounded API view of the local history, requests a model
-response, and appends the assistant message to the canonical in-memory history.
+The CLI owns an outer interaction loop and `CodingAgent.run` owns one inner ReAct loop per
+user input. `CodingAgent` retains the canonical message list between calls, so a follow-up is
+appended after the preceding assistant and tool messages instead of starting a new context.
+Each model iteration derives a bounded API view of that shared history, requests a response,
+and appends the assistant message to the canonical in-memory conversation.
 
 If the assistant returns tool calls, the loop processes them in order. For every call it:
 
@@ -19,7 +21,8 @@ uses a hosted execution tool and never treats unstructured assistant text as a s
 
 ## Invariants
 
-- The first two canonical messages are the system prompt and original user task.
+- The first canonical message is the system prompt; subsequent user turns share one history.
+- Slash commands are routed by the CLI and never enter the model-visible conversation.
 - A local tool result always carries the originating `tool_call_id`.
 - Unknown tools and invalid arguments become model-visible errors instead of process crashes.
 - Tool arguments are validated locally instead of depending on provider-specific strict schemas.
@@ -31,6 +34,8 @@ uses a hosted execution tool and never treats unstructured assistant text as a s
 - Context preparation deep-copies messages; compaction does not rewrite the event trail.
 - Credentials are read once from environment variables and never written to a session event.
 - File tools hide and reject credential `.env` files even when the model requests them directly.
+- An interrupted user turn is rolled back to its starting message boundary, so partial tool-call
+  sequences cannot corrupt the next request.
 
 ## Termination
 
@@ -45,17 +50,20 @@ The loop has independent stop reasons so a failure is diagnosable:
 | `stalled` | The same tool request appeared in three consecutive turns. |
 | `max_turns` | The configured turn budget was consumed. |
 | `invalid_task` | The initial user task was empty. |
+| `interrupted` | Ctrl+C interrupted a user turn and its partial messages were rolled back. |
 
-Ctrl+C is handled at the CLI boundary and exits with code 130.
+In interactive mode, a completed turn returns control to the prompt instead of terminating the
+process. `/new` resets the canonical messages to the system prompt. Ctrl+C during model/tool work
+returns an `interrupted` result; one-shot mode maps that result to exit code 130.
 
 ## Context policy
 
-The canonical history is kept locally for the current run and the event trail remains
+The canonical history is kept locally for the current interactive session and the event trail remains
 append-only. Before an API request, `ContextManager`:
 
 1. bounds each large tool message;
 2. estimates request size in serialized characters;
-3. preserves the system prompt and original task;
+3. preserves the system prompt and the oldest conversation anchor;
 4. keeps as much recent history as fits;
 5. adds an explicit omission notice.
 

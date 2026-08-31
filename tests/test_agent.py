@@ -70,8 +70,11 @@ class AgentLoopTests(unittest.TestCase):
     def test_repeated_calls_stop_as_stalled(self):
         repeated = ModelReply(tool_calls=(ToolCall("c", "echo", '{"value":"x"}'),))
         client = FakeClient([repeated, repeated, repeated])
-        result = build_agent(client).run("do it", "system")
+        agent = build_agent(client)
+        result = agent.run("do it", "system")
         self.assertEqual(result.status, "stalled")
+        self.assertNotIn("tool_calls", agent.history()[-1])
+        self.assertIn("Local agent stopped", agent.history()[-1]["content"])
 
     def test_max_turns(self):
         replies = [
@@ -97,7 +100,53 @@ class AgentLoopTests(unittest.TestCase):
             self.assertGreaterEqual(len(lines), 4)
             self.assertIn('"event": "session.started"', lines[0])
 
+    def test_follow_up_reuses_previous_conversation(self):
+        client = FakeClient(
+            [
+                ModelReply(content="The project is code-agent"),
+                ModelReply(content="It requires Python 3.10"),
+            ]
+        )
+        agent = build_agent(client)
+        first = agent.run("What is the project name?", "system")
+        second = agent.run("What Python version does it require?")
+
+        self.assertEqual(first.status, "completed")
+        self.assertEqual(second.status, "completed")
+        roles = [message["role"] for message in client.requests[1][0]]
+        self.assertEqual(roles, ["system", "user", "assistant", "user"])
+        self.assertEqual(
+            client.requests[1][0][-2]["content"], "The project is code-agent"
+        )
+        self.assertEqual(agent.stats()["user_turns"], 2)
+
+    def test_reset_clears_conversation_but_keeps_system_prompt(self):
+        client = FakeClient([ModelReply(content="first"), ModelReply(content="second")])
+        agent = build_agent(client)
+        agent.run("old task", "system")
+        agent.reset()
+        agent.run("new task")
+
+        self.assertEqual(
+            client.requests[1][0],
+            [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "new task"},
+            ],
+        )
+        self.assertEqual(agent.stats()["user_turns"], 1)
+
+    def test_interrupt_rolls_back_partial_turn(self):
+        class InterruptingClient:
+            def complete(self, _messages, _tools):
+                raise KeyboardInterrupt
+
+        agent = build_agent(InterruptingClient())
+        result = agent.run("interrupted task", "system")
+
+        self.assertEqual(result.status, "interrupted")
+        self.assertEqual(agent.history(), [{"role": "system", "content": "system"}])
+
 
 if __name__ == "__main__":
     unittest.main()
-

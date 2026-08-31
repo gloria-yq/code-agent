@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="code-agent", description="A small coding agent with local file and command tools."
     )
-    parser.add_argument("task", nargs="?", help="Programming task; prompted interactively if omitted")
+    parser.add_argument("task", nargs="?", help="One-shot task; omit to start interactive chat")
     parser.add_argument("--workspace", default=".", help="Directory the agent may access")
     parser.add_argument("--model", help="Model name; defaults to OPENAI_MODEL")
     parser.add_argument("--base-url", help="OpenAI-compatible API base URL")
@@ -64,14 +64,94 @@ def _status(kind: str, message: str) -> None:
     print(f"[{marker}] {message}")
 
 
+_INTERACTIVE_HELP = """Interactive commands:
+  /help       Show this help
+  /new        Clear conversation context and start a new session
+  /history    Show the current conversation transcript
+  /status     Show message, model-turn, and tool-call counts
+  /exit       Exit Code Agent (aliases: /quit, /q)
+
+Any other input is a follow-up in the same conversation."""
+
+
+def _print_result(result) -> None:
+    if result.final_text:
+        print(f"\nAssistant> {result.final_text}")
+    print(
+        f"\n[RESULT] status={result.status} turns={result.turns} "
+        f"tool_calls={result.tool_calls}"
+    )
+    if result.error:
+        print(f"[ERROR] {result.error}", file=sys.stderr)
+
+
+def _print_history(agent: CodingAgent) -> None:
+    visible = [message for message in agent.history() if message.get("role") != "system"]
+    if not visible:
+        print("Conversation is empty.")
+        return
+    for index, message in enumerate(visible, 1):
+        role = message.get("role", "unknown")
+        if role == "tool":
+            label = f"tool:{message.get('name', 'unknown')}"
+            text = "[result recorded]"
+        else:
+            label = "you" if role == "user" else role
+            text = str(message.get("content") or "")
+            if not text and message.get("tool_calls"):
+                names = [
+                    call.get("function", {}).get("name", "unknown")
+                    for call in message["tool_calls"]
+                ]
+                text = f"[tool calls: {', '.join(names)}]"
+        if len(text) > 500:
+            text = text[:500] + "...[truncated]"
+        print(f"{index:>3} {label}> {text}")
+
+
+def _interactive_loop(agent: CodingAgent) -> int:
+    print("\nInteractive conversation started. Type /help for commands; /exit to quit.")
+    while True:
+        try:
+            user_input = input("\nYou> ").strip()
+        except EOFError:
+            print("\nSession ended.")
+            return 0
+        except KeyboardInterrupt:
+            print("\nInput cleared. Type /exit to quit.")
+            continue
+        if not user_input:
+            continue
+        if user_input in {"/exit", "/quit", "/q"}:
+            print("Session ended.")
+            return 0
+        if user_input == "/help":
+            print(_INTERACTIVE_HELP)
+            continue
+        if user_input == "/new":
+            agent.reset()
+            print("Started a new conversation.")
+            continue
+        if user_input == "/history":
+            _print_history(agent)
+            continue
+        if user_input == "/status":
+            stats = agent.stats()
+            print(
+                "Conversation status: "
+                f"user_turns={stats['user_turns']} "
+                f"model_turns={stats['model_turns']} "
+                f"tool_calls={stats['tool_calls']} messages={stats['messages']}"
+            )
+            continue
+        if user_input.startswith("/"):
+            print(f"Unknown command: {user_input}. Type /help for available commands.")
+            continue
+        _print_result(agent.run(user_input))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    task = args.task
-    if not task:
-        try:
-            task = input("Describe the programming task: ").strip()
-        except EOFError:
-            task = ""
     try:
         config = AgentConfig.from_env(
             args.workspace,
@@ -122,15 +202,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Model: {config.model}")
         print(f"Provider compatibility: {config.provider}")
         print(f"Approval mode: {config.approval_mode}\n")
-        result = agent.run(task or "", build_system_prompt(config.workspace))
-        if result.final_text:
-            print(f"\n{result.final_text}")
-        print(
-            f"\n[RESULT] status={result.status} turns={result.turns} "
-            f"tool_calls={result.tool_calls}"
-        )
-        if result.error:
-            print(f"[ERROR] {result.error}", file=sys.stderr)
+        agent.start(build_system_prompt(config.workspace))
+        if args.task is None:
+            return _interactive_loop(agent)
+        result = agent.run(args.task)
+        _print_result(result)
+        if result.status == "interrupted":
+            return 130
         return 0 if result.status == "completed" else 1
     except KeyboardInterrupt:
         print("\nCancelled by user.", file=sys.stderr)
