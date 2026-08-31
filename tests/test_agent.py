@@ -31,7 +31,7 @@ def registry_with_echo():
     return registry
 
 
-def build_agent(client, registry=None, max_turns=4):
+def build_agent(client, registry=None, max_turns=4, on_event=None):
     return CodingAgent(
         client=client,
         tools=registry or registry_with_echo(),
@@ -39,6 +39,7 @@ def build_agent(client, registry=None, max_turns=4):
         approvals=ApprovalPolicy("full"),
         logger=SessionLogger(None),
         max_turns=max_turns,
+        on_event=on_event,
     )
 
 
@@ -154,6 +155,45 @@ class AgentLoopTests(unittest.TestCase):
 
         agent = build_agent(InterruptingClient())
         result = agent.run("interrupted task", "system")
+
+        self.assertEqual(result.status, "interrupted")
+        self.assertEqual(agent.history(), [{"role": "system", "content": "system"}])
+
+    def test_streaming_client_emits_presentation_neutral_events(self):
+        class StreamingClient:
+            def complete_stream(self, messages, tools, on_delta):
+                on_delta("reasoning", "private reasoning")
+                on_delta("content", "Hello")
+                on_delta("content", " world")
+                return ModelReply(content="Hello world", finish_reason="stop")
+
+        events = []
+        result = build_agent(StreamingClient(), on_event=events.append).run(
+            "say hello", "system"
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            [event.data["content"] for event in events if event.kind == "model.delta"],
+            ["private reasoning", "Hello", " world"],
+        )
+        self.assertEqual(events[-1].kind, "turn.completed")
+
+    def test_cooperative_cancel_during_stream_rolls_back_turn(self):
+        class StreamingClient:
+            def complete_stream(self, messages, tools, on_delta):
+                on_delta("content", "partial")
+                return ModelReply(content="partial")
+
+        holder = {}
+
+        def receive(event):
+            if event.kind == "model.delta":
+                holder["agent"].cancel()
+
+        agent = build_agent(StreamingClient(), on_event=receive)
+        holder["agent"] = agent
+        result = agent.run("cancel this", "system")
 
         self.assertEqual(result.status, "interrupted")
         self.assertEqual(agent.history(), [{"role": "system", "content": "system"}])

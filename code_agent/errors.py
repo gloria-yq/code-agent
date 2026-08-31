@@ -24,3 +24,6 @@ class PathOutsideWorkspaceError(ToolError):
 class ApprovalDeniedError(ToolError):
     """Raised when a mutating action is not approved."""
 
+
+class TurnCancelled(CodeAgentError):
+    """Raised when a presentation layer requests cooperative turn cancellation."""

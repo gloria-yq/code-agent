@@ -1,8 +1,8 @@
 # Code Agent：从零实现的编程智能体
 
-Code Agent 是一个小型、透明、便于理解的交互式命令行编程智能体。用户可以在同一会话中持续提出任务、追问结果、纠正方向和追加验证；每个用户回合内部，模型会根据本地工具结果持续决策，直到给出回答或触发明确的停止条件。
+Code Agent 是一个从零实现的本地编程智能体。默认界面是键盘优先的终端对话界面（TUI）：用户可以在同一会话中持续提出任务、追问结果、纠正方向和追加验证；模型文本会流式显示，工具调用、参数、状态和结果会以独立卡片呈现。
 
-本项目**未使用任何 Agent 框架或 Agent SDK**。模型客户端、对话历史、工具定义、参数校验、本地执行、上下文裁剪、权限确认、事件日志、错误处理和循环终止均在本仓库中自行实现。运行时代码只依赖 Python 标准库。
+本项目**未使用任何 Agent 框架或 Agent SDK**。模型客户端、对话历史、工具定义、参数校验、本地执行、模型输出解析、上下文裁剪、权限确认、错误处理和循环终止均在本仓库中自行实现。Textual 只负责终端界面，`keyring` 和 `platformdirs` 只负责操作系统凭据库与用户配置目录，不参与 Agent 决策或工具执行。
 
 ## 主要功能
 
@@ -12,6 +12,8 @@ Code Agent 是一个小型、透明、便于理解的交互式命令行编程智
 - 使用 `write_file` 创建文件或显式覆盖已有文件。
 - 使用 `edit_file` 执行唯一文本块替换，避免误改多处内容。
 - 使用 `run_command` 在本地执行测试、构建及其他命令。
+- 默认提供多行输入、流式输出、工具卡片和审批弹窗的 TUI。
+- 支持在界面内测试并保存 OpenAI/DeepSeek 连接，密钥进入操作系统凭据库。
 - 提供持续交互式会话，后续输入自动继承此前对话、工具调用和执行结果。
 - 支持 `/help`、`/new`、`/history`、`/status`、`/exit` 本地命令，不消耗模型请求。
 - 将每次工具结果返回模型，使模型能够继续分析、纠错和验证。
@@ -27,10 +29,10 @@ Code Agent 是一个小型、透明、便于理解的交互式命令行编程智
 ## 系统架构
 
 ```text
-交互式 CLI（用户输入 / 追问 / 本地命令）
+TUI / 经典 CLI / 未来 Web
    |
    v
-会话状态 ------> Agent 回合循环 ------> 上下文管理 ------> OpenAI 兼容模型接口
+中立事件层 <----> 会话状态 ------> Agent 回合循环 ------> 上下文管理 ------> OpenAI 兼容模型接口
    ^                                      |
    |                                      | 文本或工具调用
    |                                      v
@@ -58,8 +60,7 @@ Code Agent 是一个小型、透明、便于理解的交互式命令行编程智
 - Python 3.10 或更高版本
 - 支持 OpenAI Chat Completions tool calling 协议的模型服务
 - 对应模型服务的 API key
-
-运行时不需要安装第三方 Python 依赖。
+- 支持系统凭据库的桌面环境（推荐）；也可继续使用外部环境变量
 
 ## 安装
 
@@ -96,6 +97,15 @@ python -m pip install -e .
 
 ## 模型配置
 
+首次运行 `code-agent --workspace .` 时，如果尚未配置凭据，程序会自动打开连接弹窗。选择 DeepSeek 或 OpenAI，填入 API key、Base URL 和模型名，然后选择“Test and save”。程序只有在真实 API 连接测试成功后才保存配置。
+
+- API key 保存在操作系统凭据库，不写入项目或 `settings.json`。
+- Base URL、模型、思考模式等非敏感配置保存在用户配置目录。
+- `/config` 只显示非敏感配置和凭据来源，不显示密钥。
+- `/disconnect` 可删除当前服务商的已保存凭据。
+
+为了无界面环境和自动化兼容，仍然支持环境变量，其优先级高于系统凭据库：
+
 推荐通过系统环境变量提供配置：
 
 ```bash
@@ -112,7 +122,7 @@ $env:OPENAI_MODEL = "模型名称"
 $env:OPENAI_BASE_URL = "https://api.openai.com/v1"
 ```
 
-更推荐把密钥配置文件放在待处理工作区之外，再通过
+如果必须使用配置文件，应把它放在待处理工作区之外，再通过
 `CODE_AGENT_ENV_FILE` 指定其位置。这样 Agent 执行的项目代码无法通过普通工作区文件
 访问直接读到配置文件。例如在 Windows PowerShell 中：
 
@@ -156,34 +166,46 @@ DEEPSEEK_THINKING=enabled
 
 ## 运行方法
 
-进入推荐的持续交互模式：
+进入默认 TUI：
 
 ```bash
 code-agent --workspace .
 ```
 
-交互示例：
+在输入区中，`Enter` 发送，`Shift+Enter` 换行，`Ctrl+Enter` 也作为兼容发送快捷键；`Ctrl+C` 请求停止当前回合，`Ctrl+Q` 退出。工具执行会显示 `RUNNING`、`DONE` 或 `FAILED` 状态。
+
+界面内命令：
 
 ```text
-You> 阅读这个项目并解释测试结构
-Assistant> ...
-You> 根据刚才的分析补一个路径逃逸测试并运行测试
-Assistant> ...
-You> 再检查刚才的修改有没有遗漏
-Assistant> ...
-You> /status
-You> /exit
+/connect
+/models
+/config
+/disconnect
+/new
+/status
+/help
+/exit
 ```
 
 每条自然语言输入都复用此前消息和工具结果。以下命令完全在本地处理，不会发送给模型：
 
 | 命令 | 作用 |
 | --- | --- |
+| `/connect` | 测试并保存模型服务配置。 |
+| `/models` | 选择或输入当前服务支持的模型。 |
+| `/config` | 显示不含密钥的当前配置。 |
+| `/disconnect` | 从系统凭据库移除当前凭据。 |
 | `/help` | 显示交互命令帮助。 |
 | `/new` | 清空当前对话，但保留系统提示和工作区配置。 |
 | `/history` | 显示当前会话中的用户、模型和工具记录摘要。 |
 | `/status` | 显示用户回合、模型请求、工具调用和消息数量。 |
 | `/exit` | 结束交互会话，也可使用 `/quit` 或 `/q`。 |
+
+如需回退到单行的经典命令行会话：
+
+```bash
+code-agent --workspace . --classic
+```
 
 也可以传入任务，执行完成后直接退出，适合脚本和自动化：
 
@@ -214,6 +236,7 @@ python -m code_agent --workspace ../sample-project "完成指定编程任务"
 --max-turns N
 --approval-mode {suggest,auto-edit,full}
 --no-session-log
+--classic
 ```
 
 ## 权限模式
@@ -268,7 +291,7 @@ password、credential 的环境变量及 `CODE_AGENT_ENV_FILE`。命令具有超
 | `invalid_task` | 用户任务为空。 |
 | `interrupted` | 用户在回合执行期间按下 Ctrl+C，半截消息被回滚。 |
 
-交互模式在等待输入时按下 Ctrl+C 会清空当前输入；执行回合时按下 Ctrl+C 会回滚该回合尚未完成的消息，避免污染后续模型上下文。单次任务模式被中断时以退出码 130 结束。
+TUI 在执行回合时按下 Ctrl+C 会设置协作式取消信号；当前模型流或本地工具返回到安全边界后，回合的半截消息会被回滚，避免污染后续上下文。已经进入的单个阻塞系统调用不会被强制杀死。单次任务模式被中断时以退出码 130 结束。
 
 ## 上下文管理
 
@@ -314,6 +337,9 @@ python -m unittest discover -v
 - JSONL 事件日志；
 - Chat Completions 请求载荷和返回解析；
 - `.env` 白名单加载及环境变量优先级。
+- 系统凭据库与公开配置分离、配置优先级和失败回滚。
+- SSE 流式文本、思考内容和分片工具参数组装。
+- TUI 无头挂载、本地命令与首次连接弹窗。
 
 GitHub Actions 会在 Windows 与 Linux、Python 3.10 与 3.13 的组合上运行完整测试。
 
@@ -352,6 +378,11 @@ code-agent/
 ├─ code_agent/
 │  ├─ agent.py          # 持续会话、Agent 回合循环与终止条件
 │  ├─ llm.py            # OpenAI 兼容模型客户端
+│  ├─ settings.py       # 公开配置解析与优先级
+│  ├─ credentials.py    # 操作系统凭据库边界
+│  ├─ events.py          # 与展示层无关的运行事件
+│  ├─ service.py         # CLI/TUI 共享的运行时装配
+│  ├─ tui/               # Textual 终端对话界面
 │  ├─ context.py        # 上下文裁剪
 │  ├─ approval.py       # 权限确认策略
 │  ├─ session.py        # JSONL 事件日志

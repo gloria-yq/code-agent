@@ -2,13 +2,15 @@
 
 ## 密钥隔离
 
+界面内配置的模型 API key 保存在当前操作系统的凭据库中；用户配置文件只保存 Base URL、模型名等非敏感值。环境变量和外部 env 文件仍可用，且优先于凭据库。界面只显示凭据来源，不回显密钥。
+
 模型 API key 只应由 Code Agent 主进程中的模型客户端读取。`run_command` 启动子进程时
 会显式构造新的环境映射：保留 `PATH`、`SystemRoot`、虚拟环境等正常开发工具配置，剥离
 名称含有 API key、token、secret、password、credential 的变量，同时剥离
 `CODE_AGENT_ENV_FILE`。因此 Python、Git、Node、Java 等工具通常不受影响，但它们不会
 自动继承模型密钥。
 
-建议把配置文件放在工作区之外，并使用 `CODE_AGENT_ENV_FILE` 指定路径。工作区内 `.env`
+如使用 env 文件，建议把它放在工作区之外，并使用 `CODE_AGENT_ENV_FILE` 指定路径。工作区内 `.env`
 仅作为兼容方式保留。内置文件工具会隐藏并拒绝访问 `.env` 及其变体，命令工具也会拒绝
 对这些文件的直接引用；`.env.example` 只允许保存占位值。
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,14 +22,15 @@ _ALLOWED_ENV_FILE_KEYS = {
 }
 
 
-def load_untracked_env(path: Path) -> None:
-    """Load a tiny, allowlisted .env format without overwriting process variables."""
+def read_untracked_env(path: Path) -> dict[str, str]:
+    """Read a tiny, allowlisted dotenv file without mutating the process environment."""
     if not path.exists():
-        return
+        return {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         raise ConfigurationError(f"Cannot read untracked config {path}: {exc}") from exc
+    values: dict[str, str] = {}
     for line_number, raw_line in enumerate(lines, 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -44,6 +46,13 @@ def load_untracked_env(path: Path) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
+        values.setdefault(key, value)
+    return values
+
+
+def load_untracked_env(path: Path) -> None:
+    """Compatibility helper that loads allowlisted values without overwriting variables."""
+    for key, value in read_untracked_env(path).items():
         os.environ.setdefault(key, value)
 
 
@@ -76,29 +85,57 @@ class AgentConfig:
         approval_mode: str = "auto-edit",
     ) -> "AgentConfig":
         root = Path(workspace).expanduser().resolve()
-        if not root.is_dir():
-            raise ConfigurationError(f"Workspace is not a directory: {root}")
         configured_env_file = os.getenv("CODE_AGENT_ENV_FILE", "").strip()
         env_file = (
             Path(configured_env_file).expanduser().resolve()
             if configured_env_file
             else root / ".env"
         )
-        load_untracked_env(env_file)
+        effective_environment = read_untracked_env(env_file)
+        effective_environment.update(os.environ)
+        return cls.from_mapping(
+            root,
+            effective_environment,
+            model=model,
+            base_url=base_url,
+            provider=provider,
+            deepseek_thinking=deepseek_thinking,
+            max_turns=max_turns,
+            approval_mode=approval_mode,
+        )
 
-        provider_setting = (provider or os.getenv("CODE_AGENT_PROVIDER", "auto")).strip().lower()
+    @classmethod
+    def from_mapping(
+        cls,
+        workspace: str | Path,
+        environment: Mapping[str, str],
+        *,
+        model: str | None = None,
+        base_url: str | None = None,
+        provider: str | None = None,
+        deepseek_thinking: str | None = None,
+        max_turns: int = 24,
+        approval_mode: str = "auto-edit",
+    ) -> "AgentConfig":
+        """Resolve a config from an explicit mapping for CLI, TUI, and future web callers."""
+        root = Path(workspace).expanduser().resolve()
+        if not root.is_dir():
+            raise ConfigurationError(f"Workspace is not a directory: {root}")
+        get = environment.get
+
+        provider_setting = (provider or get("CODE_AGENT_PROVIDER", "auto")).strip().lower()
         if provider_setting not in {"auto", "openai", "deepseek"}:
             raise ConfigurationError("provider must be auto, openai, or deepseek.")
 
         candidate_base_url = (
             base_url
-            or os.getenv("OPENAI_BASE_URL")
-            or os.getenv("DEEPSEEK_BASE_URL")
+            or get("OPENAI_BASE_URL")
+            or get("DEEPSEEK_BASE_URL")
             or "https://api.openai.com/v1"
         ).strip()
         host = (urlparse(candidate_base_url).hostname or "").lower()
         inferred_deepseek = host == "api.deepseek.com" or (
-            bool(os.getenv("DEEPSEEK_API_KEY")) and not os.getenv("OPENAI_API_KEY")
+            bool(get("DEEPSEEK_API_KEY")) and not get("OPENAI_API_KEY")
         )
         resolved_provider = (
             "deepseek" if provider_setting == "auto" and inferred_deepseek else provider_setting
@@ -107,24 +144,24 @@ class AgentConfig:
             resolved_provider = "openai"
 
         if resolved_provider == "deepseek":
-            api_key = (os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
+            api_key = (get("DEEPSEEK_API_KEY") or get("OPENAI_API_KEY", "")).strip()
             chosen_model = (
                 model
-                or os.getenv("DEEPSEEK_MODEL")
-                or os.getenv("OPENAI_MODEL")
+                or get("DEEPSEEK_MODEL")
+                or get("OPENAI_MODEL")
                 or "deepseek-v4-flash"
             ).strip()
             chosen_base_url = (
                 base_url
-                or os.getenv("DEEPSEEK_BASE_URL")
-                or os.getenv("OPENAI_BASE_URL")
+                or get("DEEPSEEK_BASE_URL")
+                or get("OPENAI_BASE_URL")
                 or "https://api.deepseek.com"
             ).strip()
         else:
-            api_key = os.getenv("OPENAI_API_KEY", "").strip()
-            chosen_model = (model or os.getenv("OPENAI_MODEL", "gpt-5.4-mini")).strip()
+            api_key = get("OPENAI_API_KEY", "").strip()
+            chosen_model = (model or get("OPENAI_MODEL", "gpt-5.4-mini")).strip()
             chosen_base_url = (
-                base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+                base_url or get("OPENAI_BASE_URL", "https://api.openai.com/v1")
             ).strip()
         if not api_key:
             raise ConfigurationError(
@@ -140,7 +177,7 @@ class AgentConfig:
         if approval_mode not in {"suggest", "auto-edit", "full"}:
             raise ConfigurationError("approval_mode must be suggest, auto-edit, or full.")
         thinking_setting = (
-            deepseek_thinking or os.getenv("DEEPSEEK_THINKING", "enabled")
+            deepseek_thinking or get("DEEPSEEK_THINKING", "enabled")
         ).strip().lower()
         if thinking_setting not in {"enabled", "disabled"}:
             raise ConfigurationError("DEEPSEEK_THINKING must be enabled or disabled.")

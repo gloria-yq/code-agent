@@ -4,20 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
-from pathlib import Path
 
 from .agent import CodingAgent
-from .approval import ApprovalPolicy
-from .config import AgentConfig
-from .context import ContextManager
 from .errors import CodeAgentError, ConfigurationError
-from .llm import OpenAICompatibleClient
-from .prompt import build_system_prompt
-from .security import SecretRedactor
-from .session import SessionLogger
-from .tools import ToolRegistry, build_file_tools, build_shell_tool
-from .workspace import Workspace
+from .service import create_runtime
+from .settings import SettingsService
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,10 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--approval-mode",
         choices=("suggest", "auto-edit", "full"),
-        default="auto-edit",
-        help="suggest confirms all mutations; auto-edit confirms commands; full confirms none",
+        help="Overrides saved mode; suggest confirms all mutations; auto-edit confirms commands",
     )
     parser.add_argument("--no-session-log", action="store_true")
+    parser.add_argument(
+        "--classic",
+        action="store_true",
+        help="Use the legacy line-oriented conversation instead of the Textual TUI",
+    )
     return parser
 
 
@@ -154,7 +149,24 @@ def _interactive_loop(agent: CodingAgent) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        config = AgentConfig.from_env(
+        settings = SettingsService()
+        if args.task is None and not args.classic:
+            from .tui import CodeAgentApp
+
+            CodeAgentApp(
+                args.workspace,
+                settings=settings,
+                model=args.model,
+                base_url=args.base_url,
+                provider=args.provider,
+                deepseek_thinking=args.deepseek_thinking,
+                max_turns=args.max_turns,
+                approval_mode=args.approval_mode,
+                session_log=not args.no_session_log,
+            ).run()
+            return 0
+
+        config = settings.resolve(
             args.workspace,
             model=args.model,
             base_url=args.base_url,
@@ -163,52 +175,17 @@ def main(argv: list[str] | None = None) -> int:
             max_turns=args.max_turns,
             approval_mode=args.approval_mode,
         )
-        redactor = SecretRedactor([config.api_key])
-        workspace = Workspace(config.workspace)
-        registry = ToolRegistry()
-        for tool in build_file_tools(workspace):
-            registry.register(tool)
-        registry.register(
-            build_shell_tool(
-                workspace,
-                timeout=config.command_timeout,
-                output_limit=config.max_tool_output_chars,
-                redact=redactor.text,
-            )
+        runtime = create_runtime(
+            config,
+            confirm=_confirm,
+            on_status=_status,
+            session_log=not args.no_session_log,
         )
-
-        log_path = None
-        if not args.no_session_log:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            log_path = config.workspace / ".code-agent" / "sessions" / f"{stamp}.jsonl"
-        agent = CodingAgent(
-            client=OpenAICompatibleClient(
-                api_key=config.api_key,
-                base_url=config.base_url,
-                model=config.model,
-                provider=config.provider,
-                deepseek_thinking=config.deepseek_thinking,
-                timeout=config.request_timeout,
-            ),
-            tools=registry,
-            context=ContextManager(
-                char_budget=config.context_char_budget,
-                max_tool_output_chars=config.max_tool_output_chars,
-            ),
-            approvals=ApprovalPolicy(
-                config.approval_mode,
-                lambda spec, arguments: _confirm(spec, redactor.value(arguments)),
-            ),
-            logger=SessionLogger(log_path, redact=redactor.value),
-            max_turns=config.max_turns,
-            max_consecutive_errors=config.max_consecutive_errors,
-            on_status=lambda kind, message: _status(kind, redactor.text(message)),
-        )
+        agent = runtime.agent
         print(f"Workspace: {config.workspace}")
         print(f"Model: {config.model}")
         print(f"Provider compatibility: {config.provider}")
         print(f"Approval mode: {config.approval_mode}\n")
-        agent.start(build_system_prompt(config.workspace))
         if args.task is None:
             return _interactive_loop(agent)
         result = agent.run(args.task)

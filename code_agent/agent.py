@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .approval import ApprovalPolicy
 from .context import ContextManager
-from .errors import CodeAgentError, ModelError, ToolError
+from .errors import CodeAgentError, ModelError, ToolError, TurnCancelled
+from .events import AgentEvent
 from .protocol import ModelReply
 from .session import SessionLogger
 from .tools.registry import ToolRegistry
@@ -44,6 +46,7 @@ class CodingAgent:
         max_turns: int = 24,
         max_consecutive_errors: int = 3,
         on_status=None,
+        on_event=None,
     ):
         self.client = client
         self.tools = tools
@@ -53,12 +56,25 @@ class CodingAgent:
         self.max_turns = max_turns
         self.max_consecutive_errors = max_consecutive_errors
         self.on_status = on_status or (lambda _kind, _message: None)
+        self.on_event = on_event or (lambda _event: None)
         self._system_prompt: str | None = None
         self._messages: list[dict[str, Any]] = []
         self._session_started = False
         self._user_turns = 0
         self._model_turns = 0
         self._tool_calls = 0
+        self._cancel_requested = threading.Event()
+
+    def _emit(self, kind: str, **data: Any) -> None:
+        self.on_event(AgentEvent(kind, data))
+
+    def cancel(self) -> None:
+        """Request a cooperative stop at the next model-stream or tool boundary."""
+        self._cancel_requested.set()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested.is_set():
+            raise TurnCancelled("Turn cancelled by user")
 
     def start(self, system_prompt: str) -> None:
         """Initialize the conversation once without adding a user message."""
@@ -68,6 +84,7 @@ class CodingAgent:
         self._messages = [{"role": "system", "content": system_prompt}]
         self._session_started = True
         self.logger.emit("session.started")
+        self._emit("session.started")
 
     def reset(self) -> None:
         """Start a new conversation while retaining the configured system prompt."""
@@ -78,6 +95,7 @@ class CodingAgent:
         self._model_turns = 0
         self._tool_calls = 0
         self.logger.emit("session.reset")
+        self._emit("session.reset")
 
     def history(self) -> list[dict[str, Any]]:
         """Return a defensive copy of the complete in-memory conversation."""
@@ -107,17 +125,20 @@ class CodingAgent:
             self.start(system_prompt or "")
 
         turn_start = len(self._messages)
+        self._cancel_requested.clear()
         user_input = task.strip()
         self._messages.append({"role": "user", "content": user_input})
         self._user_turns += 1
         self.logger.emit("turn.started", user_input=user_input, user_turn=self._user_turns)
+        self._emit("turn.started", content=user_input, user_turn=self._user_turns)
         try:
             return self._run_turn()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, TurnCancelled):
             # Never leave a partial assistant/tool-call sequence in model history.
             del self._messages[turn_start:]
             self._user_turns -= 1
             self.logger.emit("turn.interrupted")
+            self._emit("turn.interrupted")
             return AgentResult("interrupted", "", 0, 0, "Turn interrupted by user")
 
     def _run_turn(self) -> AgentResult:
@@ -127,18 +148,31 @@ class CodingAgent:
         repeated_calls = 0
 
         for turn in range(1, self.max_turns + 1):
+            self._raise_if_cancelled()
             self._model_turns += 1
             self.on_status("model", f"Turn {turn}: asking the model")
+            self._emit("model.started", turn=turn)
             self.logger.emit(
                 "model.requested", turn=turn, message_count=len(self._messages)
             )
             try:
-                reply = self.client.complete(
-                    self.context.prepare(self._messages), self.tools.schemas()
-                )
+                prepared = self.context.prepare(self._messages)
+                stream = getattr(self.client, "complete_stream", None)
+                if callable(stream):
+                    reply = stream(
+                        prepared,
+                        self.tools.schemas(),
+                        lambda delta_kind, content: self._stream_delta(
+                            delta_kind, content
+                        ),
+                    )
+                else:
+                    reply = self.client.complete(prepared, self.tools.schemas())
+                self._raise_if_cancelled()
             except ModelError as exc:
                 self.logger.emit("turn.failed", turn=turn, error=str(exc))
                 self._record_local_stop(str(exc))
+                self._emit("turn.failed", status="model_error", error=str(exc))
                 return AgentResult("model_error", "", turn, tool_call_count, str(exc))
 
             self._messages.append(reply.as_assistant_message())
@@ -149,14 +183,22 @@ class CodingAgent:
                 content=reply.content,
                 tool_calls=[call.name for call in reply.tool_calls],
             )
+            self._emit(
+                "model.completed",
+                turn=turn,
+                content=reply.content,
+                tool_calls=[call.name for call in reply.tool_calls],
+            )
             if not reply.tool_calls:
                 final_text = reply.content.strip()
                 if not final_text:
                     error = "Model returned neither text nor tool calls"
                     self.logger.emit("turn.failed", turn=turn, error=error)
                     self._record_local_stop(error, replace_last=True)
+                    self._emit("turn.failed", status="protocol_error", error=error)
                     return AgentResult("protocol_error", "", turn, tool_call_count, error)
                 self.logger.emit("turn.completed", turn=turn, final_text=final_text)
+                self._emit("turn.completed", content=final_text, turn=turn)
                 return AgentResult("completed", final_text, turn, tool_call_count)
 
             signature = json.dumps(
@@ -168,12 +210,21 @@ class CodingAgent:
                 error = "The model repeated the same tool request three times"
                 self.logger.emit("turn.failed", turn=turn, error=error)
                 self._record_local_stop(error, replace_last=True)
+                self._emit("turn.failed", status="stalled", error=error)
                 return AgentResult("stalled", reply.content, turn, tool_call_count, error)
 
             for call in reply.tool_calls:
+                self._raise_if_cancelled()
                 tool_call_count += 1
                 self._tool_calls += 1
                 self.on_status("tool", f"{call.name} {call.arguments}")
+                self._emit(
+                    "tool.requested",
+                    turn=turn,
+                    call_id=call.id,
+                    tool=call.name,
+                    arguments=call.arguments,
+                )
                 self.logger.emit(
                     "tool.requested", turn=turn, call_id=call.id, tool=call.name
                 )
@@ -182,6 +233,7 @@ class CodingAgent:
                     spec = self.tools.get(call.name)
                     self.approvals.check(spec, arguments)
                     result = self.tools.execute(call.name, arguments)
+                    self._raise_if_cancelled()
                     consecutive_errors = 0
                     content = json.dumps(result, ensure_ascii=False)
                     self.logger.emit(
@@ -191,6 +243,14 @@ class CodingAgent:
                         tool=call.name,
                         result=result,
                     )
+                    self._emit(
+                        "tool.completed",
+                        call_id=call.id,
+                        tool=call.name,
+                        result=result,
+                    )
+                except TurnCancelled:
+                    raise
                 except (ToolError, CodeAgentError) as exc:
                     consecutive_errors += 1
                     content = json.dumps(
@@ -199,6 +259,9 @@ class CodingAgent:
                     )
                     self.logger.emit(
                         "tool.failed", turn=turn, call_id=call.id, tool=call.name, error=str(exc)
+                    )
+                    self._emit(
+                        "tool.failed", call_id=call.id, tool=call.name, error=str(exc)
                     )
                 self._messages.append(
                     {
@@ -212,6 +275,7 @@ class CodingAgent:
                     error = f"Stopped after {consecutive_errors} consecutive tool errors"
                     self.logger.emit("turn.failed", turn=turn, error=error)
                     self._record_local_stop(error)
+                    self._emit("turn.failed", status="tool_error_limit", error=error)
                     return AgentResult(
                         "tool_error_limit", reply.content, turn, tool_call_count, error
                     )
@@ -219,4 +283,9 @@ class CodingAgent:
         error = f"Stopped after reaching the maximum of {self.max_turns} turns"
         self.logger.emit("turn.failed", turn=self.max_turns, error=error)
         self._record_local_stop(error)
+        self._emit("turn.failed", status="max_turns", error=error)
         return AgentResult("max_turns", "", self.max_turns, tool_call_count, error)
+
+    def _stream_delta(self, delta_kind: str, content: str) -> None:
+        self._raise_if_cancelled()
+        self._emit("model.delta", delta_kind=delta_kind, content=content)
