@@ -6,12 +6,14 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 
 class SessionLogger:
-    def __init__(self, path: Path | None):
+    def __init__(self, path: Path | None, redact: Callable[[Any], Any] | None = None):
         self.path = path
+        self._redact = redact or (lambda value: value)
         self._sequence = 0
         self._lock = threading.Lock()
         if path is not None:
@@ -26,7 +28,7 @@ class SessionLogger:
                 "event": event,
                 **data,
             }
+            record = self._redact(record)
             if self.path is not None:
                 with self.path.open("a", encoding="utf-8", newline="\n") as stream:
                     stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-

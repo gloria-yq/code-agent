@@ -7,6 +7,7 @@ from code_agent.approval import ApprovalPolicy
 from code_agent.context import ContextManager
 from code_agent.protocol import ModelReply, ToolCall
 from code_agent.session import SessionLogger
+from code_agent.security import SecretRedactor
 from code_agent.tools.registry import ToolRegistry, ToolSpec
 
 from .helpers import FakeClient
@@ -99,6 +100,16 @@ class AgentLoopTests(unittest.TestCase):
             lines = log_path.read_text(encoding="utf-8").splitlines()
             self.assertGreaterEqual(len(lines), 4)
             self.assertIn('"event": "session.started"', lines[0])
+
+    def test_jsonl_log_redacts_known_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "session.jsonl"
+            secret = "super-secret-value"
+            logger = SessionLogger(log_path, redact=SecretRedactor([secret]).value)
+            logger.emit("tool.completed", result={"stdout": f"key={secret}"})
+            contents = log_path.read_text(encoding="utf-8")
+            self.assertNotIn(secret, contents)
+            self.assertIn("[REDACTED]", contents)
 
     def test_follow_up_reuses_previous_conversation(self):
         client = FakeClient(

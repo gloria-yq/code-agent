@@ -1,5 +1,7 @@
 import json
+import io
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from code_agent.errors import ModelError
@@ -138,6 +140,24 @@ class LlmParsingTests(unittest.TestCase):
     def test_rejects_missing_choices(self):
         with self.assertRaises(ModelError):
             OpenAICompatibleClient._parse({})
+
+    def test_redacts_key_from_api_error_body(self):
+        secret = "super-secret-api-key"
+        client = OpenAICompatibleClient(
+            api_key=secret, base_url="https://example.test/v1", model="test-model"
+        )
+        error = urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(f"request accidentally contained {secret}".encode()),
+        )
+        with patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(ModelError) as raised:
+                client.complete([{"role": "user", "content": "hi"}], [])
+        self.assertNotIn(secret, str(raised.exception))
+        self.assertIn("[REDACTED]", str(raised.exception))
 
 
 if __name__ == "__main__":

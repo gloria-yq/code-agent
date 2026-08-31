@@ -78,7 +78,13 @@ class AgentConfig:
         root = Path(workspace).expanduser().resolve()
         if not root.is_dir():
             raise ConfigurationError(f"Workspace is not a directory: {root}")
-        load_untracked_env(root / ".env")
+        configured_env_file = os.getenv("CODE_AGENT_ENV_FILE", "").strip()
+        env_file = (
+            Path(configured_env_file).expanduser().resolve()
+            if configured_env_file
+            else root / ".env"
+        )
+        load_untracked_env(env_file)
 
         provider_setting = (provider or os.getenv("CODE_AGENT_PROVIDER", "auto")).strip().lower()
         if provider_setting not in {"auto", "openai", "deepseek"}:

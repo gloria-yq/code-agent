@@ -1,30 +1,40 @@
-# Security policy
+# 安全说明
 
-## Credentials
+## 密钥隔离
 
-Pass credentials through environment variables or the locally ignored `.env` file. The
-built-in parser accepts only `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_BASE_URL`, and never
-overwrites existing process variables. Never commit `.env` files or include keys in
-screenshots, recordings, session logs, bug reports, or command history. If a key is ever
-committed or recorded, revoke it immediately and create a replacement.
+模型 API key 只应由 Code Agent 主进程中的模型客户端读取。`run_command` 启动子进程时
+会显式构造新的环境映射：保留 `PATH`、`SystemRoot`、虚拟环境等正常开发工具配置，剥离
+名称含有 API key、token、secret、password、credential 的变量，同时剥离
+`CODE_AGENT_ENV_FILE`。因此 Python、Git、Node、Java 等工具通常不受影响，但它们不会
+自动继承模型密钥。
 
-The built-in file listing, search, read, write, and edit paths hide or reject `.env` credential
-files. `.env.example` remains visible because it must contain placeholders only. Shell commands
-are a separate trust boundary and may still access files available to the operating-system user;
-review command approvals carefully.
+建议把配置文件放在工作区之外，并使用 `CODE_AGENT_ENV_FILE` 指定路径。工作区内 `.env`
+仅作为兼容方式保留。内置文件工具会隐藏并拒绝访问 `.env` 及其变体，命令工具也会拒绝
+对这些文件的直接引用；`.env.example` 只允许保存占位值。
 
-## Local execution
+状态显示、权限确认、命令输出、模型 API 错误和 JSONL 事件日志在输出或落盘前，会将当前
+模型密钥的完整值替换为 `[REDACTED]`。这是一层防误泄漏措施，不应代替正确的密钥存储、
+权限控制和轮换。
 
-Code Agent can modify files and run commands with the privileges of its process. Workspace
-checks constrain the built-in file tools but do not create an operating-system sandbox for
-shell commands. Use `suggest` mode when reviewing every mutation, and run unfamiliar tasks in
-a disposable checkout, container, or virtual machine.
+如果密钥曾经被提交、录屏、打印或写入公开日志，应立即在服务商控制台撤销并重新创建，
+而不是只删除文件或 Git 记录。
 
-The destructive-command filter blocks common high-impact patterns. It cannot understand every
-shell program or indirect side effect, so it must not be treated as a complete security
-boundary.
+## 本地执行边界
 
-## Reporting
+Code Agent 可以使用当前进程的操作系统权限修改文件和运行命令。工作区检查只约束内置
+文件工具；shell 的 `cwd` 并不是操作系统级文件隔离。直接 `.env` 检查基于命令文本，复杂
+脚本或间接读取可能绕过它，因此不能把该检查视为完整沙箱。
 
-Do not publish a report containing a working credential or private source code. Describe the
-smallest reproducible case and the relevant termination status or redacted JSONL events.
+处理不可信仓库或提示时，应同时采取以下措施：
+
+- 把密钥配置放在目标工作区之外；
+- 使用 `suggest` 模式逐次审批文件修改和命令；
+- 在一次性 Git checkout、容器、虚拟机或低权限独立账户中运行；
+- 只向运行环境提供完成任务真正需要的最小权限。
+
+常见破坏性命令过滤、超时和输出限制都属于纵深防护，无法理解任意程序的间接副作用。
+
+## 日志与报告
+
+会话日志可能包含任务文本、源代码片段、路径和工具结果，即使 API key 已脱敏，也不应未经
+检查直接公开。漏洞报告应只包含最小复现信息，不要包含有效凭据或私有代码。

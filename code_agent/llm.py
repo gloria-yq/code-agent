@@ -10,6 +10,7 @@ from typing import Any
 
 from .errors import ModelError
 from .protocol import ModelReply, ToolCall
+from .security import SecretRedactor
 
 
 class OpenAICompatibleClient:
@@ -27,6 +28,7 @@ class OpenAICompatibleClient:
         max_retries: int = 2,
     ):
         self.api_key = api_key
+        self._redact = SecretRedactor([api_key]).text
         self.endpoint = f"{base_url.rstrip('/')}/chat/completions"
         self.model = model
         self.provider = provider
@@ -70,7 +72,7 @@ class OpenAICompatibleClient:
                     data = json.loads(response.read().decode("utf-8"))
                 return self._parse(data)
             except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")[:2000]
+                detail = self._redact(exc.read().decode("utf-8", errors="replace")[:2000])
                 retryable = exc.code in {408, 409, 429, 500, 502, 503, 504}
                 if retryable and attempt < self.max_retries:
                     time.sleep(2**attempt)
@@ -80,7 +82,7 @@ class OpenAICompatibleClient:
                 if attempt < self.max_retries:
                     time.sleep(2**attempt)
                     continue
-                raise ModelError(f"Cannot reach model API: {exc}") from exc
+                raise ModelError(f"Cannot reach model API: {self._redact(str(exc))}") from exc
             except json.JSONDecodeError as exc:
                 raise ModelError("Model API returned invalid JSON") from exc
         raise ModelError("Model request failed after retries")

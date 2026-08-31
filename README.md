@@ -18,6 +18,8 @@ Code Agent 是一个小型、透明、便于理解的交互式命令行编程智
 - 对文件路径进行规范化，禁止文件工具访问指定工作区之外的位置。
 - 支持三种权限模式，控制文件修改和命令执行是否需要人工确认。
 - 拦截常见破坏性命令，并限制命令执行时间与输出长度。
+- 模型密钥只供主进程中的 API 客户端使用，不会传给本地命令子进程。
+- 对终端状态、命令输出、API 错误及 JSONL 日志中的已知密钥值统一脱敏。
 - 在模型异常、连续工具错误、重复调用、达到轮次上限或用户中断时停止。
 - 对超长工具输出和旧对话进行本地裁剪，控制模型请求上下文大小。
 - 将运行过程记录为追加写入的 JSONL 事件日志，便于调试和复盘。
@@ -110,7 +112,17 @@ $env:OPENAI_MODEL = "模型名称"
 $env:OPENAI_BASE_URL = "https://api.openai.com/v1"
 ```
 
-也可以将 `.env.example` 复制为待处理工作区中的 `.env`，然后在本地填写：
+更推荐把密钥配置文件放在待处理工作区之外，再通过
+`CODE_AGENT_ENV_FILE` 指定其位置。这样 Agent 执行的项目代码无法通过普通工作区文件
+访问直接读到配置文件。例如在 Windows PowerShell 中：
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\code-agent"
+Copy-Item .env.example "$env:APPDATA\code-agent\config.env"
+$env:CODE_AGENT_ENV_FILE = "$env:APPDATA\code-agent\config.env"
+```
+
+然后仅在工作区外的 `config.env` 中填写：
 
 ```text
 OPENAI_API_KEY=你的密钥
@@ -118,7 +130,13 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=模型名称
 ```
 
-程序只读取白名单配置项，且系统环境变量优先于 `.env`。`.env` 已被 Git 忽略，文件工具也会主动隐藏并拒绝读取该文件。真实密钥不得提交到仓库、写入文档或出现在公开日志中。
+macOS / Linux 可把该文件放在 `~/.config/code-agent/config.env`，并执行
+`export CODE_AGENT_ENV_FILE="$HOME/.config/code-agent/config.env"`。为方便入门，程序仍兼容
+工作区根目录中的 `.env`，但处理不可信代码时不推荐这种放置方式。
+
+程序只读取白名单配置项，且已有系统环境变量优先于配置文件。`.env` 已被 Git 忽略，
+文件工具和命令工具也会主动拒绝直接访问该文件。真实密钥不得提交到仓库、写入文档或
+出现在公开日志中。
 
 如使用其他 OpenAI 兼容服务，请修改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`。基础地址应指向服务公布的 API 根路径，程序会自动追加 `/chat/completions`。
 
@@ -232,7 +250,10 @@ python -m code_agent --workspace ../sample-project "完成指定编程任务"
 
 ### `run_command`
 
-在工作区目录中执行前台命令，返回退出码、标准输出和标准错误。命令具有超时及输出上限，常见破坏性模式会被直接拒绝。
+在工作区目录中执行前台命令，返回退出码、标准输出和标准错误。命令子进程保留 `PATH`、
+`SystemRoot`、虚拟环境等正常工具链配置，但会剥离名称包含 API key、token、secret、
+password、credential 的环境变量及 `CODE_AGENT_ENV_FILE`。命令具有超时及输出上限，
+常见破坏性模式和对 `.env` 的直接访问会被拒绝。
 
 ## 循环终止条件
 
@@ -268,7 +289,7 @@ Agent 在内存中保留整个交互会话的完整消息历史，并通过 JSON
 - 工具参数错误不会导致主进程崩溃，而会作为结构化结果返回模型纠正。
 - 每次模型请求、响应、工具调用、工具结果和最终状态都会写入 JSONL 事件。
 - 默认日志目录为工作区中的 `.code-agent/sessions/`，该目录不会提交到 Git。
-- 日志不会记录 API key，但任务内容、工具参数和工具输出可能包含项目数据，不应公开分享未经检查的日志。
+- 已知的模型 API key 会在写入日志前递归替换为 `[REDACTED]`；任务内容、工具参数和工具输出仍可能包含其他项目数据，不应公开分享未经检查的日志。
 
 ## 测试
 
@@ -311,13 +332,18 @@ GitHub Actions 会在 Windows 与 Linux、Python 3.10 与 3.13 的组合上运�
 
 - 所有文件工具路径均经过 `Workspace.resolve` 规范化并限制在工作区内。
 - `.env` 及其本地变体会被文件工具隐藏并拒绝访问，`.env.example` 只能包含占位值。
+- 本地命令不会继承模型 API key 等凭据环境变量；直接读取 `.env` 的命令会被拒绝。
+- 已知 API key 会在状态输出、命令结果、API 错误和会话日志边界统一脱敏。
 - 已有文件不会被隐式覆盖。
 - 文本替换必须唯一匹配。
 - 命令执行具有超时和输出上限。
 - 凭据和会话日志均被 Git 忽略。
 - API 请求不使用 Code Interpreter、托管 Shell、Files API 或服务端文件搜索。
 
-需要注意：Shell 命令以当前进程的操作系统权限运行。工作目录限制和危险模式过滤不能替代真正的系统沙箱。详细说明见 [`SECURITY.md`](SECURITY.md)。
+需要注意：Shell 命令仍以当前进程的操作系统权限运行，应用层的命令文本检查可能被间接
+读取方式绕过。工作目录限制、凭据剥离和危险模式过滤不能替代真正的系统沙箱。处理不可信
+项目时，应把密钥文件放在工作区外，并使用容器、虚拟机或低权限独立账户。详细说明见
+[`SECURITY.md`](SECURITY.md)。
 
 ## 项目结构
 

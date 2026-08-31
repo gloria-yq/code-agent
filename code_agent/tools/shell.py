@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from typing import Any
 
 from ..errors import ToolError
+from ..security import sanitized_subprocess_env
 from ..workspace import Workspace
 from .registry import ToolSpec
 
@@ -19,21 +21,40 @@ DANGEROUS_PATTERNS = (
     r"(^|\s)(sudo|runas)(\s|$)",
 )
 
+SENSITIVE_FILE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])\.env(?!\.example(?![A-Za-z0-9_.-]))"
+    r"(?:\.[A-Za-z0-9_-]+)*(?![A-Za-z0-9_.-])",
+    re.IGNORECASE,
+)
+
 
 def command_is_dangerous(command: str) -> bool:
     lowered = command.strip().lower()
     return any(re.search(pattern, lowered) for pattern in DANGEROUS_PATTERNS)
 
 
+def command_references_sensitive_file(command: str) -> bool:
+    """Block direct shell references to local dotenv credential files."""
+    return bool(SENSITIVE_FILE_PATTERN.search(command))
+
+
 def build_shell_tool(
-    workspace: Workspace, *, timeout: float = 60.0, output_limit: int = 20_000
+    workspace: Workspace,
+    *,
+    timeout: float = 60.0,
+    output_limit: int = 20_000,
+    redact: Callable[[str], str] | None = None,
 ) -> ToolSpec:
+    redact_text = redact or (lambda value: value)
+
     def run_command(args: dict[str, Any]) -> dict[str, Any]:
         command = args["command"].strip()
         if not command:
             raise ToolError("command cannot be empty")
         if command_is_dangerous(command):
             raise ToolError("Command rejected by the destructive-command safety policy")
+        if command_references_sensitive_file(command):
+            raise ToolError("Command rejected because it directly references a credential file")
         cwd = workspace.resolve(args.get("cwd", "."), must_exist=True)
         if not cwd.is_dir():
             raise ToolError("cwd must be a directory")
@@ -50,10 +71,10 @@ def build_shell_tool(
                 encoding="utf-8",
                 errors="replace",
                 timeout=chosen_timeout,
-                env=os.environ.copy(),
+                env=sanitized_subprocess_env(os.environ),
             )
-            stdout = completed.stdout
-            stderr = completed.stderr
+            stdout = redact_text(completed.stdout)
+            stderr = redact_text(completed.stderr)
             truncated = len(stdout) + len(stderr) > output_limit
             if truncated:
                 remaining = output_limit
@@ -70,8 +91,8 @@ def build_shell_tool(
                 "truncated": truncated,
             }
         except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "")[:output_limit]
-            stderr = (exc.stderr or "")[: max(output_limit - len(stdout), 0)]
+            stdout = redact_text(exc.stdout or "")[:output_limit]
+            stderr = redact_text(exc.stderr or "")[: max(output_limit - len(stdout), 0)]
             return {
                 "ok": False,
                 "command": command,
@@ -88,7 +109,8 @@ def build_shell_tool(
         name="run_command",
         description=(
             "Run a foreground shell command inside the workspace. Use it to inspect the project "
-            "and run tests. Destructive commands are rejected and execution is time-limited."
+            "and run tests. Credential environment variables are withheld; destructive commands "
+            "and direct dotenv-file access are rejected; execution is time-limited."
         ),
         parameters={
             "type": "object",
@@ -103,4 +125,3 @@ def build_shell_tool(
         handler=run_command,
         mutation_kind="command",
     )
-

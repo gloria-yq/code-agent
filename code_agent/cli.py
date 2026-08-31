@@ -14,6 +14,7 @@ from .context import ContextManager
 from .errors import CodeAgentError, ConfigurationError
 from .llm import OpenAICompatibleClient
 from .prompt import build_system_prompt
+from .security import SecretRedactor
 from .session import SessionLogger
 from .tools import ToolRegistry, build_file_tools, build_shell_tool
 from .workspace import Workspace
@@ -162,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             max_turns=args.max_turns,
             approval_mode=args.approval_mode,
         )
+        redactor = SecretRedactor([config.api_key])
         workspace = Workspace(config.workspace)
         registry = ToolRegistry()
         for tool in build_file_tools(workspace):
@@ -171,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
                 workspace,
                 timeout=config.command_timeout,
                 output_limit=config.max_tool_output_chars,
+                redact=redactor.text,
             )
         )
 
@@ -192,11 +195,14 @@ def main(argv: list[str] | None = None) -> int:
                 char_budget=config.context_char_budget,
                 max_tool_output_chars=config.max_tool_output_chars,
             ),
-            approvals=ApprovalPolicy(config.approval_mode, _confirm),
-            logger=SessionLogger(log_path),
+            approvals=ApprovalPolicy(
+                config.approval_mode,
+                lambda spec, arguments: _confirm(spec, redactor.value(arguments)),
+            ),
+            logger=SessionLogger(log_path, redact=redactor.value),
             max_turns=config.max_turns,
             max_consecutive_errors=config.max_consecutive_errors,
-            on_status=_status,
+            on_status=lambda kind, message: _status(kind, redactor.text(message)),
         )
         print(f"Workspace: {config.workspace}")
         print(f"Model: {config.model}")

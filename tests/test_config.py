@@ -26,6 +26,21 @@ class ConfigTests(unittest.TestCase):
                 config = AgentConfig.from_env(directory)
             self.assertEqual(config.api_key, "process-key")
 
+    def test_supports_credential_file_outside_the_workspace(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            with tempfile.TemporaryDirectory() as config_directory:
+                env_file = Path(config_directory, "agent.env")
+                env_file.write_text(
+                    "OPENAI_API_KEY=external-key\nOPENAI_MODEL=external-model\n",
+                    encoding="utf-8",
+                )
+                with patch.dict(
+                    os.environ, {"CODE_AGENT_ENV_FILE": str(env_file)}, clear=True
+                ):
+                    config = AgentConfig.from_env(workspace)
+            self.assertEqual(config.api_key, "external-key")
+            self.assertEqual(config.model, "external-model")
+
     def test_rejects_unknown_env_file_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, ".env").write_text("UNRELATED=value\n", encoding="utf-8")
