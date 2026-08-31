@@ -37,6 +37,7 @@ class UserSettings:
     )
     approval_mode: str = "auto-edit"
     theme: str = "code-agent-dark"
+    recent_workspaces: tuple[str, ...] = ()
 
 
 class SettingsService:
@@ -93,11 +94,21 @@ class SettingsService:
         ).strip().lower()
         approval_mode = str(payload.get("approval_mode", defaults.approval_mode)).strip()
         theme = str(payload.get("theme", defaults.theme)).strip()
+        raw_workspaces = payload.get("recent_workspaces", [])
+        if not isinstance(raw_workspaces, list) or not all(
+            isinstance(item, str) for item in raw_workspaces
+        ):
+            raise ConfigurationError("recent_workspaces must be a list of paths.")
+        recent_workspaces = tuple(
+            dict.fromkeys(item.strip() for item in raw_workspaces if item.strip())
+        )[:8]
         if default_provider not in providers:
             raise ConfigurationError("default_provider must name a configured provider.")
         if approval_mode not in {"suggest", "auto-edit", "full"}:
             raise ConfigurationError("approval_mode must be suggest, auto-edit, or full.")
-        return UserSettings(default_provider, providers, approval_mode, theme)
+        return UserSettings(
+            default_provider, providers, approval_mode, theme, recent_workspaces
+        )
 
     def save(self, settings: UserSettings) -> None:
         payload: dict[str, Any] = {
@@ -107,6 +118,7 @@ class SettingsService:
             },
             "approval_mode": settings.approval_mode,
             "theme": settings.theme,
+            "recent_workspaces": list(settings.recent_workspaces),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -147,6 +159,7 @@ class SettingsService:
             providers=providers,
             approval_mode=current.approval_mode,
             theme=current.theme,
+            recent_workspaces=current.recent_workspaces,
         )
         # Keep the public file and keyring update transactional where possible.
         previous_key = self.credentials.get(provider)
@@ -177,7 +190,32 @@ class SettingsService:
         providers[provider] = ProviderSettings(
             selected.base_url, model, selected.thinking
         )
-        updated = UserSettings(provider, providers, current.approval_mode, current.theme)
+        updated = UserSettings(
+            provider,
+            providers,
+            current.approval_mode,
+            current.theme,
+            current.recent_workspaces,
+        )
+        self.save(updated)
+        return updated
+
+    def remember_workspace(self, workspace: str | Path) -> UserSettings:
+        root = Path(workspace).expanduser().resolve()
+        if not root.is_dir():
+            raise ConfigurationError(f"Workspace is not a directory: {root}")
+        current = self.load()
+        canonical = str(root)
+        recent = (canonical,) + tuple(
+            item for item in current.recent_workspaces if item != canonical
+        )
+        updated = UserSettings(
+            current.default_provider,
+            current.providers,
+            current.approval_mode,
+            current.theme,
+            recent[:8],
+        )
         self.save(updated)
         return updated
 

@@ -131,6 +131,32 @@ class SettingsServiceTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             self.service.load()
 
+    def test_remember_workspace_is_deduplicated_and_contains_no_secret(self):
+        first = self.root / "first"
+        second = self.root / "second"
+        first.mkdir()
+        second.mkdir()
+        self.store.set("deepseek", "stored-secret")
+
+        self.service.remember_workspace(first)
+        self.service.remember_workspace(second)
+        settings = self.service.remember_workspace(first)
+
+        self.assertEqual(
+            settings.recent_workspaces,
+            (str(first.resolve()), str(second.resolve())),
+        )
+        raw = self.service.path.read_text(encoding="utf-8")
+        self.assertNotIn("stored-secret", raw)
+
+    def test_rejects_invalid_recent_workspace_shape(self):
+        self.service.path.parent.mkdir(parents=True)
+        self.service.path.write_text(
+            json.dumps({"recent_workspaces": "not-a-list"}), encoding="utf-8"
+        )
+        with self.assertRaises(ConfigurationError):
+            self.service.load()
+
 
 if __name__ == "__main__":
     unittest.main()

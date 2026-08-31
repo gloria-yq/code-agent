@@ -13,7 +13,7 @@ from textual.widgets import Label, Static
 
 from ..agent import AgentResult
 from ..config import AgentConfig
-from ..errors import CodeAgentError, ConfigurationError
+from ..errors import CodeAgentError, ConfigurationError, MissingCredentialError
 from ..events import AgentEvent
 from ..service import AgentRuntime, create_runtime, test_model_connection
 from ..settings import SettingsService
@@ -23,6 +23,7 @@ from .screens import (
     ConnectScreen,
     ConnectionForm,
     ModelScreen,
+    WorkspaceScreen,
 )
 from .widgets import Composer, MessageBlock, ToolCard
 
@@ -32,14 +33,15 @@ HELP_TEXT = """### Local commands
 - `/connect` configure or replace a provider credential
 - `/models` select the active model
 - `/config` inspect non-secret settings
+- `/workspace` switch the single local workspace and start a new conversation
 - `/disconnect` remove the active provider credential
 - `/new` clear this conversation
 - `/status` show session counters
 - `/help` show this help
 - `/exit` leave Code Agent
 
-Use **Enter** to send, **Shift+Enter** for a new line, **Ctrl+C** to stop a running turn,
-and **Ctrl+Q** to exit.
+Use **Enter** to send, **Shift+Enter** for a new line, **Ctrl+O** to choose a workspace,
+**Esc** or **×** to close a dialog, **Ctrl+C** to stop a running turn, and **Ctrl+Q** to exit.
 """
 
 
@@ -137,10 +139,46 @@ class CodeAgentApp(App[None]):
         background: #0f172a;
         border: solid #475569;
     }
+    .modal-header {
+        height: 4;
+        border-bottom: solid #334155;
+        margin-bottom: 1;
+        align-vertical: middle;
+    }
     .modal-title {
-        height: 2;
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
         color: #f8fafc;
         text-style: bold;
+    }
+    .modal-header .modal-close {
+        width: 5;
+        min-width: 5;
+        height: 1;
+        margin: 0;
+        color: #0f172a;
+        background: #f8fafc;
+        border: none;
+        content-align: center middle;
+        text-align: center;
+        text-style: bold;
+    }
+    .modal-header .modal-close:hover {
+        color: #0f172a;
+        background: #e2e8f0;
+        border: none;
+    }
+    .modal-header .modal-close:focus {
+        color: #0f172a;
+        background: #cbd5e1;
+        border: none;
+        outline: none;
+    }
+    .modal-body {
+        height: 1fr;
+        scrollbar-color: #475569;
+        scrollbar-color-hover: #22c55e;
     }
     .helper { color: #94a3b8; margin-bottom: 1; height: auto; }
     .form-error { color: #fca5a5; border-left: thick #ef4444; padding-left: 1; }
@@ -149,8 +187,21 @@ class CodeAgentApp(App[None]):
     .form-fields Input, .form-fields Select { width: 100%; }
     .switch-row { height: 3; align-vertical: middle; }
     .switch-row Label { width: 1fr; }
-    .modal-actions { height: 3; margin-top: 1; align-horizontal: right; }
-    .modal-actions Button { margin-left: 1; min-width: 16; }
+    .modal-actions {
+        height: 4;
+        margin-top: 1;
+        align-horizontal: right;
+        align-vertical: bottom;
+        border-top: solid #334155;
+    }
+    .modal-actions Button {
+        height: 3;
+        margin-left: 1;
+        min-width: 16;
+        content-align: center middle;
+        text-align: center;
+    }
+    .modal-actions Button:focus { outline: tall #22c55e; }
     .approval-tool { color: #fbbf24; text-style: bold; }
     .approval-arguments, .config-summary {
         height: auto;
@@ -162,14 +213,27 @@ class CodeAgentApp(App[None]):
         border: solid #334155;
         overflow-y: auto;
     }
-    .model-modal { width: 64; }
-    .config-modal { width: 64; }
+    .connect-modal { height: 90%; }
+    .approval-modal { height: 80%; }
+    .model-modal { width: 64; height: 22; }
+    .config-modal { width: 64; height: 20; }
+    .workspace-modal { width: 90%; height: 90%; }
+    .workspace-body { height: 1fr; }
+    .workspace-modal DirectoryTree {
+        height: 1fr;
+        margin: 1 0;
+        border: solid #334155;
+        background: #020617;
+    }
+    #workspace-error { display: none; }
+    #workspace-error.visible { display: block; }
     """
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_turn", "Stop turn", show=True, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+p", "connect", "Connect", show=True),
+        Binding("ctrl+o", "workspace", "Workspace", show=True),
     ]
 
     def __init__(
@@ -204,6 +268,7 @@ class CodeAgentApp(App[None]):
         self._assistant: MessageBlock | None = None
         self._assistant_pending = ""
         self._tool_cards: dict[str, ToolCard] = {}
+        self._pending_workspace: Path | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("Code Agent", id="topbar")
@@ -226,6 +291,14 @@ class CodeAgentApp(App[None]):
     def _load_runtime(self) -> None:
         try:
             config = self.settings.resolve(self.workspace, **self.overrides)
+        except MissingCredentialError:
+            self._set_status("No provider connected")
+            self.action_connect(
+                "No global provider credential is configured. Connect once to test "
+                "the provider and store its API key in the operating-system credential "
+                "store for reuse across workspaces."
+            )
+            return
         except ConfigurationError as exc:
             self._set_status("No provider connected")
             self.action_connect(str(exc))
@@ -233,13 +306,15 @@ class CodeAgentApp(App[None]):
         self._activate(config)
 
     def _activate(self, config: AgentConfig) -> None:
-        self.config = config
-        self.runtime = create_runtime(
+        runtime = create_runtime(
             config,
             confirm=self._confirm_from_worker,
             on_event=self._receive_agent_event,
             session_log=self.session_log,
         )
+        self.workspace = config.workspace
+        self.config = config
+        self.runtime = runtime
         self._set_status("Ready")
         self._refresh_topbar()
         self.query_one(Composer).disabled = False
@@ -268,6 +343,7 @@ class CodeAgentApp(App[None]):
             self.action_connect("Connect a provider before sending a task.")
             return
         composer = self.query_one(Composer)
+        self._append_message("user", text)
         composer.clear()
         composer.disabled = True
         self.busy = True
@@ -307,9 +383,7 @@ class CodeAgentApp(App[None]):
 
     def _handle_agent_event(self, event: AgentEvent) -> None:
         data = event.data
-        if event.kind == "turn.started":
-            self._append_message("user", str(data.get("content", "")))
-        elif event.kind == "model.started":
+        if event.kind == "model.started":
             self._assistant = self._append_message("assistant", "")
             self._assistant_pending = ""
             self._set_status(f"Thinking · model turn {data.get('turn', '?')}")
@@ -398,6 +472,7 @@ class CodeAgentApp(App[None]):
 
     def _connect_submitted(self, form: ConnectionForm | None) -> None:
         if form is None:
+            self._pending_workspace = None
             return
         self._set_status("Testing provider connection…")
         self.connect_provider(form)
@@ -436,6 +511,11 @@ class CodeAgentApp(App[None]):
 
     def _connect_succeeded(self) -> None:
         self.notify("Provider connected and stored securely.", severity="information")
+        if self._pending_workspace is not None:
+            workspace = self._pending_workspace
+            self._pending_workspace = None
+            self._workspace_selected(workspace)
+            return
         self._load_runtime()
 
     def action_models(self) -> None:
@@ -445,6 +525,56 @@ class CodeAgentApp(App[None]):
         self.push_screen(
             ModelScreen(self.config.provider, self.config.model), self._model_selected
         )
+
+    def action_workspace(self) -> None:
+        if self.busy:
+            self.notify(
+                "Stop the active turn before switching workspaces.", severity="warning"
+            )
+            return
+        try:
+            recent = self.settings.load().recent_workspaces
+        except ConfigurationError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.push_screen(
+            WorkspaceScreen(self.workspace, recent), self._workspace_selected
+        )
+
+    def _workspace_selected(self, workspace: Path | None) -> None:
+        if workspace is None:
+            return
+        workspace = workspace.expanduser().resolve()
+        if workspace == self.workspace:
+            self.notify("This workspace is already active.")
+            return
+        previous_workspace = self.workspace
+        try:
+            config = self.settings.resolve(workspace, **self.overrides)
+            self._activate(config)
+        except MissingCredentialError:
+            self._pending_workspace = workspace
+            self.action_connect(
+                "This workspace has no local API key. Connect once to store a provider "
+                "credential in the operating-system credential store; after the test "
+                "succeeds, the workspace switch will continue automatically."
+            )
+            return
+        except (CodeAgentError, OSError) as exc:
+            self.notify(f"Cannot switch workspace: {exc}", severity="error")
+            return
+        try:
+            self.settings.remember_workspace(previous_workspace)
+            self.settings.remember_workspace(workspace)
+        except ConfigurationError as exc:
+            self.notify(
+                f"Workspace switched, but recent history was not saved: {exc}",
+                severity="warning",
+            )
+        self._clear_conversation(
+            f"Workspace switched to `{workspace}`. A new conversation was started."
+        )
+        self.notify(f"Workspace: {workspace}")
 
     def _model_selected(self, model: str | None) -> None:
         if not model or not self.config:
@@ -470,6 +600,8 @@ class CodeAgentApp(App[None]):
             self.action_models()
         elif name == "/config":
             self.action_config()
+        elif name == "/workspace":
+            self.action_workspace()
         elif name == "/new":
             if self.runtime and not self.busy:
                 self.runtime.agent.reset()

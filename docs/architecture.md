@@ -23,6 +23,8 @@ Agent 通过 `AgentEvent` 发布与界面无关的事件，包括回合开始、
 工具结果、终止和错误。TUI 只订阅这些事件，不实现第二套 Agent 循环。因此未来 Web 界面可以
 复用配置服务、运行时装配和事件协议，无需改动工具或模型循环。
 
+用户提交的文本由 TUI 在启动后台 Agent 之前立即写入对话区，`turn.started` 事件只负责运行时观测，不再重复渲染。工作区切换会完整重建 `Workspace`、工具注册表、系统提示和日志路径，不会在旧运行时上就地替换根目录。
+
 ## 不变量
 
 - The first canonical message is the system prompt; subsequent user turns share one history.

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .errors import ConfigurationError
+from .errors import ConfigurationError, MissingCredentialError
 
 _ALLOWED_ENV_FILE_KEYS = {
     "CODE_AGENT_PROVIDER",
@@ -164,7 +164,7 @@ class AgentConfig:
                 base_url or get("OPENAI_BASE_URL", "https://api.openai.com/v1")
             ).strip()
         if not api_key:
-            raise ConfigurationError(
+            raise MissingCredentialError(
                 "No model API key is set. Export OPENAI_API_KEY or DEEPSEEK_API_KEY; "
                 "never put it in the repository."
             )

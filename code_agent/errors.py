@@ -9,6 +9,10 @@ class ConfigurationError(CodeAgentError):
     """Raised when required runtime configuration is missing or invalid."""
 
 
+class MissingCredentialError(ConfigurationError):
+    """Raised when no credential is available for the selected provider."""
+
+
 class ModelError(CodeAgentError):
     """Raised when the model endpoint fails or returns an invalid response."""
 

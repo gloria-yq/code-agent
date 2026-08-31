@@ -98,11 +98,13 @@ python -m pip install -e .
 ## 模型配置
 
 首次运行 `code-agent --workspace .` 时，如果尚未配置凭据，程序会自动打开连接弹窗。选择 DeepSeek 或 OpenAI，填入 API key、Base URL 和模型名，然后选择“Test and save”。程序只有在真实 API 连接测试成功后才保存配置。
+也可在任意时候输入 `/connect` 重新配置。这是 TUI 的主要鉴权入口：配置成功一次后，凭据属于当前操作系统用户，不属于某个工作区，后续切换到没有 `.env` 的项目也可继续使用。
 
 - API key 保存在操作系统凭据库，不写入项目或 `settings.json`。
 - Base URL、模型、思考模式等非敏感配置保存在用户配置目录。
 - `/config` 只显示非敏感配置和凭据来源，不显示密钥。
 - `/disconnect` 可删除当前服务商的已保存凭据。
+- 最近工作区只保存目录路径，不保存项目内容或密钥。
 
 为了无界面环境和自动化兼容，仍然支持环境变量，其优先级高于系统凭据库：
 
@@ -172,7 +174,7 @@ DEEPSEEK_THINKING=enabled
 code-agent --workspace .
 ```
 
-在输入区中，`Enter` 发送，`Shift+Enter` 换行，`Ctrl+Enter` 也作为兼容发送快捷键；`Ctrl+C` 请求停止当前回合，`Ctrl+Q` 退出。工具执行会显示 `RUNNING`、`DONE` 或 `FAILED` 状态。
+在输入区中，`Enter` 发送，`Shift+Enter` 换行，`Ctrl+Enter` 也作为兼容发送快捷键；`Ctrl+O` 选择工作区，`Ctrl+C` 请求停止当前回合，`Ctrl+Q` 退出。用户消息在发送后会立即出现在对话区；工具执行会显示 `RUNNING`、`DONE` 或 `FAILED` 状态。
 
 界面内命令：
 
@@ -180,6 +182,7 @@ code-agent --workspace .
 /connect
 /models
 /config
+/workspace
 /disconnect
 /new
 /status
@@ -194,12 +197,16 @@ code-agent --workspace .
 | `/connect` | 测试并保存模型服务配置。 |
 | `/models` | 选择或输入当前服务支持的模型。 |
 | `/config` | 显示不含密钥的当前配置。 |
+| `/workspace` | 从路径、最近目录或目录树选择新工作区。 |
 | `/disconnect` | 从系统凭据库移除当前凭据。 |
 | `/help` | 显示交互命令帮助。 |
 | `/new` | 清空当前对话，但保留系统提示和工作区配置。 |
 | `/history` | 显示当前会话中的用户、模型和工具记录摘要。 |
 | `/status` | 显示用户回合、模型请求、工具调用和消息数量。 |
 | `/exit` | 结束交互会话，也可使用 `/quit` 或 `/q`。 |
+
+切换工作区时，程序会先验证目录，然后重建文件工具、命令工具、系统提示和会话日志边界。旧对话不会带入新工作区，执行任务期间也不允许切换。
+如果当前只能从旧工作区的 `.env` 取得密钥，而新工作区没有凭据，TUI 会自动打开连接表单。用户明确输入密钥并通过测试后，程序将其保存到系统凭据库并自动继续原工作区切换。程序不会在未经授权的情况下把 `.env` 密钥迁移到全局凭据库。
 
 如需回退到单行的经典命令行会话：
 

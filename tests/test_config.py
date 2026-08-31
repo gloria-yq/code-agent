@@ -5,10 +5,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from code_agent.config import AgentConfig
-from code_agent.errors import ConfigurationError
+from code_agent.errors import ConfigurationError, MissingCredentialError
 
 
 class ConfigTests(unittest.TestCase):
+    def test_missing_api_key_has_a_distinct_recoverable_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(MissingCredentialError):
+                    AgentConfig.from_env(directory)
+
     def test_loads_allowlisted_untracked_env_file(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, ".env").write_text(
