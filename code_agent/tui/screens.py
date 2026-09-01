@@ -11,6 +11,7 @@ from typing import Any
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.content import Content
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DirectoryTree, Input, Label, Select, Static, Switch
@@ -55,10 +56,11 @@ class ApprovalScreen(DismissibleModalScreen):
                 yield Label("Approval required", classes="modal-title")
                 yield Button("X", id="dismiss", classes="modal-close", compact=True)
             with VerticalScroll(classes="modal-body"):
-                yield Label(self.tool, classes="approval-tool")
+                yield Label(self.tool, classes="approval-tool", markup=False)
                 yield Static(
                     json.dumps(self.arguments, ensure_ascii=False, indent=2, default=str),
                     classes="approval-arguments",
+                    markup=False,
                 )
                 yield Label("Review the complete action before allowing it.", classes="helper")
             with Horizontal(classes="modal-actions"):
@@ -95,7 +97,7 @@ class ConnectScreen(DismissibleModalScreen):
                     classes="helper",
                 )
                 if self.error:
-                    yield Static(self.error, classes="form-error")
+                    yield Static(self.error, classes="form-error", markup=False)
                 with Vertical(classes="form-fields"):
                     yield Label("Provider", classes="field-label")
                     yield Select(
@@ -164,7 +166,10 @@ class ModelScreen(DismissibleModalScreen):
                 yield Button("X", id="dismiss", classes="modal-close", compact=True)
             with VerticalScroll(classes="modal-body"):
                 yield Select(
-                    [(model, model) for model in dict.fromkeys(suggestions)],
+                    [
+                        (Content.from_text(model, markup=False), model)
+                        for model in dict.fromkeys(suggestions)
+                    ],
                     value=self.current_model,
                     allow_blank=False,
                     id="model-select",
@@ -275,14 +280,21 @@ class SessionScreen(DismissibleModalScreen):
                     yield Label("Conversation", classes="field-label")
                     yield Select(
                         [
-                            (self._option_label(session), session.session_id)
+                            (
+                                Content.from_text(
+                                    self._option_label(session), markup=False
+                                ),
+                                session.session_id,
+                            )
                             for session in self.sessions
                         ],
                         value=self.selected_id,
                         allow_blank=False,
                         id="session-select",
                     )
-                    yield Static("", id="session-preview", classes="session-preview")
+                    yield Static(
+                        "", id="session-preview", classes="session-preview", markup=False
+                    )
                 else:
                     yield Static(
                         "No saved conversations exist in this workspace yet.\n"
@@ -372,14 +384,19 @@ class ProcessScreen(DismissibleModalScreen):
                     yield Label("Application", classes="field-label")
                     yield Select(
                         [
-                            (self._option_label(item), str(item["process_id"]))
+                            (
+                                Content.from_text(self._option_label(item), markup=False),
+                                str(item["process_id"]),
+                            )
                             for item in self.processes
                         ],
                         value=self.selected_id,
                         allow_blank=False,
                         id="process-select",
                     )
-                    yield Static("", id="process-preview", classes="process-preview")
+                    yield Static(
+                        "", id="process-preview", classes="process-preview", markup=False
+                    )
                 else:
                     yield Static(
                         "No applications have been launched in this workspace.\n"
@@ -485,15 +502,20 @@ class WorkspaceScreen(DismissibleModalScreen):
                 if self.recent:
                     yield Label("Recent workspaces", classes="field-label")
                     yield Select(
-                        [(path, path) for path in self.recent],
+                        [
+                            (Content.from_text(path, markup=False), path)
+                            for path in self.recent
+                        ],
                         prompt="Choose a recent workspace",
                         id="workspace-recent",
                     )
                 yield Label("Workspace path", classes="field-label")
                 yield Input(value=str(self.current), id="workspace-path")
-                yield Static("", id="workspace-error", classes="form-error")
+                yield Static("", id="workspace-error", classes="form-error", markup=False)
                 yield Label(
-                    f"Browse directories under {tree_root}", classes="field-label"
+                    f"Browse directories under {tree_root}",
+                    classes="field-label",
+                    markup=False,
                 )
                 yield DirectoryTree(tree_root, id="workspace-tree")
             with Horizontal(classes="modal-actions"):
@@ -563,7 +585,7 @@ class ConfigScreen(DismissibleModalScreen):
                 yield Label("Configuration", classes="modal-title")
                 yield Button("X", id="dismiss", classes="modal-close", compact=True)
             with VerticalScroll(classes="modal-body"):
-                yield Static("\n".join(lines), classes="config-summary")
+                yield Static("\n".join(lines), classes="config-summary", markup=False)
                 yield Label("Secret values are never displayed.", classes="helper")
             with Horizontal(classes="modal-actions"):
                 yield Button("Back", id="close", variant="primary", compact=True)

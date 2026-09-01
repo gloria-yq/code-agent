@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import shlex
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import threading
 import time
 import uuid
 import webbrowser
+import weakref
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, IO
 from urllib.parse import urlparse
@@ -26,6 +30,7 @@ from .workspace import Workspace
 
 _MODES = {"auto", "terminal", "web", "desktop"}
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_MANAGERS: weakref.WeakSet[ProcessManager] = weakref.WeakSet()
 
 
 @dataclass
@@ -61,6 +66,7 @@ class ProcessManager:
         self._popen = popen or subprocess.Popen
         self._items: dict[str, ManagedProcess] = {}
         self._lock = threading.Lock()
+        _MANAGERS.add(self)
 
     def start(
         self,
@@ -92,6 +98,8 @@ class ProcessManager:
         normalized_url, ready_port = self._resolve_web_target(
             resolved_mode, url, port
         )
+        if normalized_url and ready_port:
+            self._ensure_port_available(normalized_url, ready_port)
         process = self._spawn(command, resolved_cwd, resolved_mode)
         process_id = uuid.uuid4().hex[:8]
         item = ManagedProcess(
@@ -109,9 +117,9 @@ class ProcessManager:
         self._start_log_reader(process.stderr, item.stderr)
 
         if resolved_mode == "web":
-            assert ready_port is not None
+            assert normalized_url is not None and ready_port is not None
             try:
-                self._wait_until_ready(item, ready_port, ready_timeout_seconds)
+                self._wait_until_ready(item, normalized_url, ready_timeout_seconds)
                 self.open(process_id)
             except ProcessError:
                 self.stop(process_id)
@@ -284,8 +292,21 @@ class ProcessManager:
             raise ProcessError("Preview URL contains an invalid port.") from exc
 
     @staticmethod
+    def _ensure_port_available(url: str, port: int) -> None:
+        host = urlparse(url).hostname or "127.0.0.1"
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                pass
+        except OSError:
+            return
+        raise ProcessError(
+            f"Cannot launch web application: {host}:{port} is already in use. "
+            "Choose another local port and try again."
+        )
+
+    @staticmethod
     def _wait_until_ready(
-        item: ManagedProcess, port: int, timeout_seconds: int
+        item: ManagedProcess, url: str, timeout_seconds: int
     ) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
@@ -294,15 +315,46 @@ class ProcessManager:
                     f"Web application exited before it became ready.\n"
                     f"{ProcessManager._logs(item)}"
                 )
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            if ProcessManager._http_responds(url):
+                if item.process.poll() is None:
                     return
-            except OSError:
+                raise ProcessError(
+                    f"Web application exited after its readiness check.\n"
+                    f"{ProcessManager._logs(item)}"
+                )
+            else:
                 time.sleep(0.1)
         raise ProcessError(
-            f"Web application did not listen on port {port} within {timeout_seconds} seconds.\n"
+            f"Web application did not return an HTTP response at {url} within "
+            f"{timeout_seconds} seconds.\n"
             f"{ProcessManager._logs(item)}"
         )
+
+    @staticmethod
+    def _http_responds(url: str) -> bool:
+        parsed = urlparse(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        connection: HTTPConnection
+        if parsed.scheme == "https":
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            connection = HTTPSConnection(host, port, timeout=0.5, context=context)
+        else:
+            connection = HTTPConnection(host, port, timeout=0.5)
+        try:
+            connection.request("GET", path, headers={"Connection": "close"})
+            response = connection.getresponse()
+            response.read(1)
+            return True
+        except (HTTPException, OSError, TimeoutError):
+            return False
+        finally:
+            connection.close()
 
     def _start_log_reader(self, stream: IO[str] | None, target: deque[str]) -> None:
         if stream is None:
@@ -346,3 +398,15 @@ def sys_platform() -> str:
     import sys
 
     return sys.platform
+
+
+def _stop_managed_processes_at_exit() -> None:
+    """Best-effort cleanup when the interpreter exits through a normal error path."""
+    for manager in tuple(_MANAGERS):
+        try:
+            manager.stop_all()
+        except Exception:
+            pass
+
+
+atexit.register(_stop_managed_processes_at_exit)

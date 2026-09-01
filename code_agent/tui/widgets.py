@@ -64,7 +64,9 @@ class ToolCard(Collapsible):
     def __init__(self, call_id: str, tool: str, arguments: str):
         self.call_id = call_id
         self.tool = tool
-        self.body = Static(arguments or "{}", classes="tool-body")
+        # Tool arguments and results may contain CSS selectors or source code such as
+        # ``[data-player="X"]``. They are plain text, never trusted Rich markup.
+        self.body = Static(arguments or "{}", classes="tool-body", markup=False)
         super().__init__(
             self.body,
             title=f"RUNNING  {tool}",

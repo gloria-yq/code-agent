@@ -3,13 +3,14 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from code_agent.errors import ProcessError, ToolError
-from code_agent.processes import ProcessManager
+from code_agent.processes import ManagedProcess, ProcessManager
 from code_agent.tools.process import build_process_tools
 from code_agent.workspace import Workspace
 
@@ -33,6 +34,56 @@ class FakeProcess:
 
 
 class ProcessManagerTests(unittest.TestCase):
+    def test_web_launch_rejects_a_port_owned_by_an_existing_process(self):
+        with tempfile.TemporaryDirectory() as directory, socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            calls = []
+            manager = ProcessManager(
+                Workspace(Path(directory)),
+                popen=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+            with self.assertRaisesRegex(ProcessError, "already in use"):
+                manager.start(command="python server.py", mode="web", port=port)
+
+            self.assertEqual(calls, [])
+
+    def test_tcp_connection_without_http_response_is_not_ready(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            listener.settimeout(0.1)
+            port = listener.getsockname()[1]
+            stopped = False
+
+            def close_connections():
+                while not stopped:
+                    try:
+                        connection, _address = listener.accept()
+                    except (OSError, TimeoutError):
+                        continue
+                    connection.close()
+
+            thread = threading.Thread(target=close_connections, daemon=True)
+            thread.start()
+            item = ManagedProcess(
+                process_id="empty-http",
+                name="empty",
+                mode="web",
+                command="empty server",
+                cwd=".",
+                process=FakeProcess(),
+                url=f"http://127.0.0.1:{port}",
+            )
+            try:
+                with self.assertRaisesRegex(ProcessError, "did not return an HTTP response"):
+                    ProcessManager._wait_until_ready(item, item.url, 1)
+            finally:
+                stopped = True
+            thread.join(timeout=1)
+
     def test_terminal_launch_uses_new_console_and_strips_credentials_on_windows(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = []

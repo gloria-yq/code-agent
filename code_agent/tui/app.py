@@ -315,11 +315,11 @@ class CodeAgentApp(App[None]):
         self._pending_workspace: Path | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("Code Agent", id="topbar")
+        yield Static("Code Agent", id="topbar", markup=False)
         yield VerticalScroll(id="conversation")
         yield Label("MESSAGE  Enter sends · Shift+Enter adds a line", id="composer-label")
         yield Composer(id="composer", placeholder="Describe a coding task or type /help")
-        yield Static("Loading configuration…", id="statusbar")
+        yield Static("Loading configuration…", id="statusbar", markup=False)
 
     def on_mount(self) -> None:
         self._ui_thread = threading.get_ident()

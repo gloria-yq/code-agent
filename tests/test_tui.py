@@ -24,7 +24,7 @@ from code_agent.tui.screens import (
     SessionScreen,
     WorkspaceScreen,
 )
-from code_agent.tui.widgets import Composer, MessageBlock
+from code_agent.tui.widgets import Composer, MessageBlock, ToolCard
 
 
 class FakeAgent:
@@ -252,6 +252,95 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         [block.content for block in user_messages], ["show my message"]
                     )
+
+    async def test_code_and_logs_are_rendered_as_plain_text_not_rich_markup(self):
+        root = Path.cwd()
+        config = AgentConfig(
+            api_key="not-a-real-secret",
+            base_url="https://example.test/v1",
+            model="test-model",
+            workspace=root,
+        )
+        runtime = SimpleNamespace(agent=FakeAgent())
+        app = CodeAgentApp(root, settings=ConfiguredSettings(config), session_log=False)
+        payload = '[data-player=\\"X\\"]::after { color: var(--x); }'
+
+        with patch("code_agent.tui.app.create_runtime", return_value=runtime):
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+
+                card = ToolCard("call-css", "write_file", payload)
+                await app.query_one("#conversation").mount(card)
+                await pilot.pause()
+                card.finish(result={"content": payload})
+                await pilot.pause()
+                self.assertIn("data-player", str(card.body.render()))
+
+                approval = ApprovalScreen("write_file", {"content": payload})
+                app.push_screen(approval)
+                await pilot.pause()
+                self.assertIn(
+                    "data-player",
+                    str(approval.query_one(".approval-arguments").render()),
+                )
+                await pilot.press("escape")
+                await pilot.pause()
+
+                process_screen = ProcessScreen(
+                    (
+                        {
+                            "process_id": "css-app",
+                            "name": payload,
+                            "status": "running",
+                            "mode": "web",
+                            "pid": 123,
+                            "command": payload,
+                            "cwd": ".",
+                            "url": "http://127.0.0.1:8000",
+                            "logs": payload,
+                        },
+                    )
+                )
+                app.push_screen(process_screen)
+                await pilot.pause()
+                self.assertIn(
+                    "data-player",
+                    str(process_screen.query_one("#process-preview").render()),
+                )
+                await pilot.press("escape")
+                await pilot.pause()
+
+                summary = ConversationSummary(
+                    session_id="css-session",
+                    title=payload,
+                    created_at="2026-09-01T12:00:00+00:00",
+                    updated_at="2026-09-01T12:00:00+00:00",
+                    message_count=1,
+                    tool_calls=0,
+                    preview=(("user", payload),),
+                )
+                session_screen = SessionScreen((summary,))
+                app.push_screen(session_screen)
+                await pilot.pause()
+                self.assertIn(
+                    "data-player",
+                    str(session_screen.query_one("#session-preview").render()),
+                )
+                await pilot.press("escape")
+                await pilot.pause()
+
+                connect_screen = ConnectScreen(settings=app.settings.load(), error=payload)
+                app.push_screen(connect_screen)
+                await pilot.pause()
+                self.assertIn(
+                    "data-player",
+                    str(connect_screen.query_one(".form-error").render()),
+                )
+                await pilot.press("escape")
+                await pilot.pause()
+
+                app._set_status(payload)
+                self.assertIn("data-player", str(app.query_one("#statusbar").render()))
 
     async def test_workspace_picker_rebuilds_runtime_and_starts_new_conversation(self):
         with tempfile.TemporaryDirectory() as directory:
