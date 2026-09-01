@@ -42,7 +42,15 @@ class ProcessManagerTests(unittest.TestCase):
                 return FakeProcess()
 
             manager = ProcessManager(Workspace(Path(directory)), popen=fake_popen)
-            with patch.dict(os.environ, {"DEMO_API_KEY": "never-pass-this"}):
+            # Headless Linux CI has no installed terminal emulator. Mock discovery here:
+            # this test verifies spawn configuration, not the runner's desktop packages.
+            with (
+                patch.dict(os.environ, {"DEMO_API_KEY": "never-pass-this"}),
+                patch(
+                    "code_agent.processes.shutil.which",
+                    return_value="/usr/bin/fake-terminal",
+                ),
+            ):
                 result = manager.start(command="python game.py", mode="terminal")
 
             self.assertEqual(result["status"], "running")
