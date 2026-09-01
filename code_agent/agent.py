@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .approval import ApprovalPolicy
+from .conversation import ConversationStore, ConversationSummary
 from .context import ContextManager
 from .errors import CodeAgentError, ModelError, ToolError, TurnCancelled
 from .events import AgentEvent
@@ -43,6 +44,7 @@ class CodingAgent:
         context: ContextManager,
         approvals: ApprovalPolicy,
         logger: SessionLogger,
+        conversations: ConversationStore | None = None,
         max_turns: int = 24,
         max_consecutive_errors: int = 3,
         on_status=None,
@@ -53,6 +55,7 @@ class CodingAgent:
         self.context = context
         self.approvals = approvals
         self.logger = logger
+        self.conversations = conversations
         self.max_turns = max_turns
         self.max_consecutive_errors = max_consecutive_errors
         self.on_status = on_status or (lambda _kind, _message: None)
@@ -64,6 +67,7 @@ class CodingAgent:
         self._model_turns = 0
         self._tool_calls = 0
         self._cancel_requested = threading.Event()
+        self._session_id: str | None = None
 
     def _emit(self, kind: str, **data: Any) -> None:
         self.on_event(AgentEvent(kind, data))
@@ -94,12 +98,41 @@ class CodingAgent:
         self._user_turns = 0
         self._model_turns = 0
         self._tool_calls = 0
+        self._session_id = None
         self.logger.emit("session.reset")
         self._emit("session.reset")
 
     def history(self) -> list[dict[str, Any]]:
         """Return a defensive copy of the complete in-memory conversation."""
         return copy.deepcopy(self._messages)
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    def list_conversations(self) -> tuple[ConversationSummary, ...]:
+        return self.conversations.list() if self.conversations else ()
+
+    def resume(self, session_id: str) -> None:
+        if self.conversations is None:
+            raise CodeAgentError("Conversation persistence is not available.")
+        record = self.conversations.load(session_id)
+        self._messages = record.messages
+        self._system_prompt = str(record.messages[0].get("content") or "")
+        self._session_started = True
+        self._session_id = record.session_id
+        self._user_turns = sum(1 for item in self._messages if item.get("role") == "user")
+        self._model_turns = sum(
+            1 for item in self._messages if item.get("role") == "assistant"
+        )
+        self._tool_calls = sum(1 for item in self._messages if item.get("role") == "tool")
+        self.logger.emit("session.resumed", session_id=session_id)
+        self._emit("session.resumed", session_id=session_id, title=record.title)
+
+    def _persist(self) -> None:
+        if self.conversations is None:
+            return
+        self._session_id = self.conversations.save(self._session_id, self._messages) or None
 
     def stats(self) -> dict[str, int]:
         return {
@@ -116,6 +149,7 @@ class CodingAgent:
             self._messages[-1] = note
         else:
             self._messages.append(note)
+        self._persist()
 
     def run(self, task: str, system_prompt: str | None = None) -> AgentResult:
         """Append one user turn and continue from the existing conversation."""
@@ -128,6 +162,7 @@ class CodingAgent:
         self._cancel_requested.clear()
         user_input = task.strip()
         self._messages.append({"role": "user", "content": user_input})
+        self._persist()
         self._user_turns += 1
         self.logger.emit("turn.started", user_input=user_input, user_turn=self._user_turns)
         self._emit("turn.started", content=user_input, user_turn=self._user_turns)
@@ -137,6 +172,7 @@ class CodingAgent:
             # Never leave a partial assistant/tool-call sequence in model history.
             del self._messages[turn_start:]
             self._user_turns -= 1
+            self._persist()
             self.logger.emit("turn.interrupted")
             self._emit("turn.interrupted")
             return AgentResult("interrupted", "", 0, 0, "Turn interrupted by user")
@@ -176,6 +212,9 @@ class CodingAgent:
                 return AgentResult("model_error", "", turn, tool_call_count, str(exc))
 
             self._messages.append(reply.as_assistant_message())
+            # Persist tool-call intent before any local side effect. If the process dies
+            # during execution, ConversationStore repairs the missing result on resume.
+            self._persist()
             self.logger.emit(
                 "model.responded",
                 turn=turn,
@@ -271,6 +310,7 @@ class CodingAgent:
                         "content": content,
                     }
                 )
+                self._persist()
                 if consecutive_errors >= self.max_consecutive_errors:
                     error = f"Stopped after {consecutive_errors} consecutive tool errors"
                     self.logger.emit("turn.failed", turn=turn, error=error)

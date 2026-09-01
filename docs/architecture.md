@@ -25,6 +25,17 @@ Agent 通过 `AgentEvent` 发布与界面无关的事件，包括回合开始、
 
 用户提交的文本由 TUI 在启动后台 Agent 之前立即写入对话区，`turn.started` 事件只负责运行时观测，不再重复渲染。工作区切换会完整重建 `Workspace`、工具注册表、系统提示和日志路径，不会在旧运行时上就地替换根目录。
 
+## 可见程序生命周期
+
+短时测试与构建继续使用同步的 `run_command`；需要用户实际操作的程序由独立的
+`ProcessManager` 管理。它为交互式 CLI 打开系统终端，为本地 Web 服务等待端口就绪后打开
+浏览器，为桌面程序启动 GUI 进程。管理器记录稳定的进程 ID、工作目录、状态、URL 和受限
+日志，并向模型暴露启动、列举、重开预览和停止四个窄接口。
+
+进程管理器属于工作区运行时：同一工作区重建模型连接时复用，切换工作区时不复用。TUI 在
+切换、断开或退出前处理仍运行的进程，避免失去管理句柄。所有子进程都使用剥离模型凭据后
+的环境；Web 预览只允许回环地址。这一层负责生命周期和凭据边界，不构成操作系统沙箱。
+
 ## 不变量
 
 - The first canonical message is the system prompt; subsequent user turns share one history.
@@ -37,6 +48,7 @@ Agent 通过 `AgentEvent` 发布与界面无关的事件，包括回合开始、
 - Existing files are never overwritten implicitly.
 - An exact edit succeeds only when its old block occurs once.
 - The command executor always has a timeout and output limit.
+- Long-running applications use managed process IDs and never inherit model credentials.
 - Context preparation deep-copies messages; compaction does not rewrite the event trail.
 - 凭据从环境变量、外部 env 文件或操作系统凭据库解析，不写入公开配置或会话事件。
 - File tools hide and reject credential `.env` files even when the model requests them directly.
@@ -56,16 +68,19 @@ The loop has independent stop reasons so a failure is diagnosable:
 | `stalled` | The same tool request appeared in three consecutive turns. |
 | `max_turns` | The configured turn budget was consumed. |
 | `invalid_task` | The initial user task was empty. |
-| `interrupted` | Ctrl+C interrupted a user turn and its partial messages were rolled back. |
+| `interrupted` | Esc interrupted a TUI user turn and its partial messages were rolled back. |
 
 In interactive mode, a completed turn returns control to the prompt instead of terminating the
-process. `/new` resets the canonical messages to the system prompt. Ctrl+C during model/tool work
+process. `/new` resets the canonical messages to the system prompt. Esc during model/tool work
 returns an `interrupted` result; one-shot mode maps that result to exit code 130.
 
 ## 上下文策略
 
-The canonical history is kept locally for the current interactive session and the event trail remains
-append-only. Before an API request, `ContextManager`:
+The canonical history is kept in memory and atomically snapshotted under the active workspace after
+each user message, assistant response, and tool result. `ConversationStore` lists and restores those
+snapshots independently from the append-only diagnostic event trail. A resume operation validates the
+message roles and repairs a tool call that was durably recorded before a process ended but never received
+a result. Before an API request, `ContextManager`:
 
 1. bounds each large tool message;
 2. estimates request size in serialized characters;

@@ -5,6 +5,7 @@ from pathlib import Path
 from code_agent.agent import CodingAgent
 from code_agent.approval import ApprovalPolicy
 from code_agent.context import ContextManager
+from code_agent.conversation import ConversationStore
 from code_agent.protocol import ModelReply, ToolCall
 from code_agent.session import SessionLogger
 from code_agent.security import SecretRedactor
@@ -131,6 +132,39 @@ class AgentLoopTests(unittest.TestCase):
             client.requests[1][0][-2]["content"], "The project is code-agent"
         )
         self.assertEqual(agent.stats()["user_turns"], 2)
+
+    def test_saved_conversation_can_resume_in_a_new_agent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConversationStore(Path(directory))
+            first = CodingAgent(
+                client=FakeClient([ModelReply(content="The answer is 42")]),
+                tools=registry_with_echo(),
+                context=ContextManager(char_budget=10_000, max_tool_output_chars=1000),
+                approvals=ApprovalPolicy("full"),
+                logger=SessionLogger(None),
+                conversations=store,
+            )
+            first.run("Remember this answer", "system")
+            session_id = first.session_id
+
+            second_client = FakeClient([ModelReply(content="I remember")])
+            second = CodingAgent(
+                client=second_client,
+                tools=registry_with_echo(),
+                context=ContextManager(char_budget=10_000, max_tool_output_chars=1000),
+                approvals=ApprovalPolicy("full"),
+                logger=SessionLogger(None),
+                conversations=store,
+            )
+            second.start("new system")
+            second.resume(session_id)
+            second.run("What was it?")
+
+            self.assertEqual(
+                [message["role"] for message in second_client.requests[0][0]],
+                ["system", "user", "assistant", "user"],
+            )
+            self.assertEqual(second_client.requests[0][0][2]["content"], "The answer is 42")
 
     def test_reset_clears_conversation_but_keeps_system_prompt(self):
         client = FakeClient([ModelReply(content="first"), ModelReply(content="second")])

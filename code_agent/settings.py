@@ -200,6 +200,23 @@ class SettingsService:
         self.save(updated)
         return updated
 
+    def select_approval_mode(self, mode: str) -> UserSettings:
+        mode = mode.strip().lower()
+        if mode not in {"suggest", "auto-edit", "full"}:
+            raise ConfigurationError(
+                "approval mode must be suggest, auto-edit, or full."
+            )
+        current = self.load()
+        updated = UserSettings(
+            current.default_provider,
+            current.providers,
+            mode,
+            current.theme,
+            current.recent_workspaces,
+        )
+        self.save(updated)
+        return updated
+
     def remember_workspace(self, workspace: str | Path) -> UserSettings:
         root = Path(workspace).expanduser().resolve()
         if not root.is_dir():

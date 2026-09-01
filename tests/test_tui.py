@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 
 from code_agent.agent import AgentResult
 from code_agent.config import AgentConfig
+from code_agent.conversation import ConversationSummary
 from code_agent.errors import ConfigurationError, MissingCredentialError
 from code_agent.settings import UserSettings
 from code_agent.tui.app import CodeAgentApp
@@ -18,16 +19,25 @@ from code_agent.tui.screens import (
     ConfigScreen,
     ConnectScreen,
     ModelScreen,
+    PermissionScreen,
+    ProcessScreen,
+    SessionScreen,
     WorkspaceScreen,
 )
 from code_agent.tui.widgets import Composer, MessageBlock
 
 
 class FakeAgent:
+    cancelled = False
+    resumed = None
+    saved_conversations = ()
+    restored_history = [{"role": "system", "content": "system"}]
+
     def run(self, task):
         return AgentResult("completed", "done", 1, 0)
 
     def cancel(self):
+        self.cancelled = True
         return None
 
     def reset(self):
@@ -36,23 +46,37 @@ class FakeAgent:
     def stats(self):
         return {"user_turns": 0, "model_turns": 0, "tool_calls": 0, "messages": 0}
 
+    def list_conversations(self):
+        return self.saved_conversations
+
+    def resume(self, session_id):
+        self.resumed = session_id
+
+    def history(self):
+        return self.restored_history
+
 
 class ConfiguredSettings:
     def __init__(self, config):
         self.config = config
         self.remembered: list[Path] = []
+        self.approval_mode = config.approval_mode if config else "auto-edit"
 
     def resolve(self, workspace, **overrides):
         return replace(self.config, workspace=Path(workspace).resolve())
 
     def load(self):
-        return UserSettings()
+        return replace(UserSettings(), approval_mode=self.approval_mode)
 
     def credential_source(self, provider, workspace):
         return "system-keyring"
 
     def remember_workspace(self, workspace):
         self.remembered.append(Path(workspace).resolve())
+        return self.load()
+
+    def select_approval_mode(self, mode):
+        self.approval_mode = mode
         return self.load()
 
 
@@ -71,6 +95,43 @@ class TargetCredentialSettings(ConfiguredSettings):
         if self.blocked and Path(workspace).resolve() == self.target:
             raise MissingCredentialError("No model API key is set.")
         return super().resolve(workspace, **overrides)
+
+
+class FakeProcessManager:
+    def __init__(self):
+        self.opened = []
+        self.stopped = []
+        self.running = True
+
+    def list(self):
+        return (
+            {
+                "process_id": "app12345",
+                "name": "Tic-Tac-Toe",
+                "mode": "web",
+                "status": "running" if self.running else "stopped",
+                "pid": 1234,
+                "command": "python server.py",
+                "cwd": ".",
+                "url": "http://127.0.0.1:8000",
+                "logs": "ready",
+            },
+        )
+
+    def open(self, process_id):
+        self.opened.append(process_id)
+        return self.list()[0]
+
+    def stop(self, process_id):
+        self.stopped.append(process_id)
+        self.running = False
+        return self.list()[0]
+
+    def has_running(self):
+        return self.running
+
+    def stop_all(self):
+        self.running = False
 
 
 class ComposerHarness(App[None]):
@@ -133,6 +194,31 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("ctrl+enter")
             await pilot.pause()
             self.assertEqual(app.submissions, ["alternate"])
+
+    async def test_ctrl_c_is_free_and_escape_stops_a_running_turn(self):
+        declared_keys = {binding.key for binding in CodeAgentApp.BINDINGS}
+        self.assertNotIn("ctrl+c", declared_keys)
+        self.assertIn("escape", declared_keys)
+
+        root = Path.cwd()
+        config = AgentConfig(
+            api_key="not-a-real-secret",
+            base_url="https://example.test/v1",
+            model="test-model",
+            workspace=root,
+        )
+        app = CodeAgentApp(
+            root, settings=ConfiguredSettings(config), session_log=False
+        )
+        agent = FakeAgent()
+        runtime = SimpleNamespace(agent=agent)
+        with patch("code_agent.tui.app.create_runtime", return_value=runtime):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                app.busy = True
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertTrue(agent.cancelled)
 
     async def test_app_mounts_and_local_help_adds_message(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -237,6 +323,9 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
         dialogs = (
             (ConnectScreen(settings.load()), ("dismiss", "cancel", "save")),
             (ModelScreen("openai", "test-model"), ("dismiss", "cancel", "save")),
+            (PermissionScreen("auto-edit"), ("dismiss", "cancel", "save")),
+            (ProcessScreen(()), ("dismiss", "cancel", "open", "stop")),
+            (SessionScreen(()), ("dismiss", "cancel", "resume")),
             (WorkspaceScreen(root), ("dismiss", "cancel", "switch")),
             (ConfigScreen(settings.load(), "system-keyring"), ("dismiss", "close")),
             (ApprovalScreen("write_file", {"path": "demo.txt"}), ("dismiss", "reject", "allow")),
@@ -252,6 +341,111 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("escape")
                     await pilot.pause()
                     self.assertIsNot(app.screen, dialog)
+
+    async def test_permission_mode_changes_in_place_without_losing_conversation(self):
+        root = Path.cwd()
+        config = AgentConfig(
+            api_key="not-a-real-secret",
+            base_url="https://example.test/v1",
+            model="test-model",
+            workspace=root,
+            approval_mode="auto-edit",
+        )
+        settings = ConfiguredSettings(config)
+        app = CodeAgentApp(root, settings=settings, session_log=False)
+        agent = FakeAgent()
+        agent.approvals = SimpleNamespace(mode="auto-edit")
+        runtime = SimpleNamespace(agent=agent)
+        with patch("code_agent.tui.app.create_runtime", return_value=runtime) as created:
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                app._append_message("user", "keep this conversation")
+                before = list(app.query(MessageBlock))
+
+                app.action_permissions()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, PermissionScreen)
+                app.screen.query_one("#permission-mode").value = "suggest"
+                app.screen.query_one("#save").press()
+                await pilot.pause()
+
+                self.assertEqual(settings.approval_mode, "suggest")
+                self.assertEqual(app.config.approval_mode, "suggest")
+                self.assertEqual(runtime.agent.approvals.mode, "suggest")
+                self.assertEqual(app.overrides["approval_mode"], "suggest")
+                self.assertEqual(created.call_count, 1)
+                self.assertEqual(list(app.query(MessageBlock)), before)
+
+    async def test_resume_picker_restores_saved_conversation(self):
+        root = Path.cwd()
+        config = AgentConfig(
+            api_key="not-a-real-secret",
+            base_url="https://example.test/v1",
+            model="test-model",
+            workspace=root,
+        )
+        summary = ConversationSummary(
+            session_id="20260901-120000-1234abcd",
+            title="Fix the parser",
+            created_at="2026-09-01T12:00:00+00:00",
+            updated_at="2026-09-01T12:05:00+00:00",
+            message_count=3,
+            tool_calls=0,
+            preview=(("user", "Fix the parser"), ("assistant", "Done")),
+        )
+        agent = FakeAgent()
+        agent.saved_conversations = (summary,)
+        agent.restored_history = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "Fix the parser"},
+            {"role": "assistant", "content": "Done"},
+        ]
+        app = CodeAgentApp(root, settings=ConfiguredSettings(config), session_log=False)
+        runtime = SimpleNamespace(agent=agent)
+        with patch("code_agent.tui.app.create_runtime", return_value=runtime):
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app._route_command("/resume")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SessionScreen)
+                self.assertIn("Fix the parser", str(app.screen.query_one("#session-preview").render()))
+                app.screen.query_one("#resume").press()
+                await pilot.pause()
+
+                self.assertEqual(agent.resumed, summary.session_id)
+                visible = [block.content for block in app.query(MessageBlock)]
+                self.assertIn("Fix the parser", visible)
+                self.assertIn("Done", visible)
+
+    async def test_process_screen_can_reopen_and_stop_application(self):
+        root = Path.cwd()
+        config = AgentConfig(
+            api_key="not-a-real-secret",
+            base_url="https://example.test/v1",
+            model="test-model",
+            workspace=root,
+        )
+        manager = FakeProcessManager()
+        runtime = SimpleNamespace(agent=FakeAgent(), processes=manager)
+        app = CodeAgentApp(root, settings=ConfiguredSettings(config), session_log=False)
+        with patch("code_agent.tui.app.create_runtime", return_value=runtime):
+            async with app.run_test(size=(100, 32)) as pilot:
+                await pilot.pause()
+                app._route_command("/processes")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, ProcessScreen)
+                self.assertIn(
+                    "RUNNING", str(app.screen.query_one("#process-preview").render())
+                )
+                app.screen.query_one("#open").press()
+                await pilot.pause()
+                self.assertEqual(manager.opened, ["app12345"])
+                self.assertIsInstance(app.screen, ProcessScreen)
+                app.screen.query_one("#stop").press()
+                await pilot.pause()
+                self.assertEqual(manager.stopped, ["app12345"])
+                self.assertIsInstance(app.screen, ProcessScreen)
+                self.assertTrue(app.screen.query_one("#stop").disabled)
 
     async def test_workspace_without_local_env_opens_global_credential_form(self):
         with tempfile.TemporaryDirectory() as directory:

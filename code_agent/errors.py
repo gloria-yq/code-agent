@@ -31,3 +31,11 @@ class ApprovalDeniedError(ToolError):
 
 class TurnCancelled(CodeAgentError):
     """Raised when a presentation layer requests cooperative turn cancellation."""
+
+
+class ConversationError(CodeAgentError):
+    """Raised when a saved conversation cannot be read or restored safely."""
+
+
+class ProcessError(CodeAgentError):
+    """Raised when a managed preview process cannot be started or controlled."""

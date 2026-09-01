@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DirectoryTree, Input, Label, Select, Static, Switch
 
 from ..settings import UserSettings
+from ..conversation import ConversationSummary
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,12 @@ class ConnectionForm:
     base_url: str
     model: str
     thinking: bool
+
+
+@dataclass(frozen=True)
+class ProcessAction:
+    action: str
+    process_id: str
 
 
 class DismissibleModalScreen(ModalScreen[Any]):
@@ -177,6 +185,280 @@ class ModelScreen(DismissibleModalScreen):
             self.dismiss(None)
         elif event.button.id == "save":
             self.dismiss(self.query_one("#custom-model", Input).value.strip() or None)
+
+
+class PermissionScreen(DismissibleModalScreen):
+    DESCRIPTIONS = {
+        "suggest": "Ask before every file change and command execution.",
+        "auto-edit": "Apply file changes automatically; ask before commands. Recommended.",
+        "full": (
+            "Apply file changes and run commands without approval. Recognized destructive "
+            "commands remain blocked."
+        ),
+    }
+
+    def __init__(self, current_mode: str):
+        super().__init__()
+        self.current_mode = current_mode
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal permission-modal"):
+            with Horizontal(classes="modal-header"):
+                yield Label("Permission mode", classes="modal-title")
+                yield Button("X", id="dismiss", classes="modal-close", compact=True)
+            with VerticalScroll(classes="modal-body"):
+                yield Label(
+                    "Choose how Code Agent approves local changes and commands.",
+                    classes="helper",
+                )
+                yield Label("Mode", classes="field-label")
+                yield Select(
+                    [
+                        ("Suggest — confirm changes and commands", "suggest"),
+                        ("Auto-edit — confirm commands", "auto-edit"),
+                        ("Full — no approval prompts", "full"),
+                    ],
+                    value=self.current_mode,
+                    allow_blank=False,
+                    id="permission-mode",
+                )
+                yield Static(
+                    self.DESCRIPTIONS[self.current_mode],
+                    id="permission-description",
+                    classes="permission-description",
+                )
+                yield Label(
+                    "The new mode applies immediately and is saved for future sessions.",
+                    classes="helper",
+                )
+            with Horizontal(classes="modal-actions"):
+                yield Button("Back", id="cancel", compact=True)
+                yield Button("Apply mode", id="save", variant="success", compact=True)
+
+    @on(Select.Changed, "#permission-mode")
+    def selected(self, event: Select.Changed) -> None:
+        mode = str(event.value)
+        if mode in self.DESCRIPTIONS:
+            self.query_one("#permission-description", Static).update(
+                self.DESCRIPTIONS[mode]
+            )
+
+    @on(Button.Pressed)
+    def choose(self, event: Button.Pressed) -> None:
+        if event.button.id in {"cancel", "dismiss"}:
+            self.dismiss(None)
+        elif event.button.id == "save":
+            mode = str(self.query_one("#permission-mode", Select).value)
+            self.dismiss(mode if mode in self.DESCRIPTIONS else None)
+
+
+class SessionScreen(DismissibleModalScreen):
+    """Workspace-scoped conversation picker with a compact transcript preview."""
+
+    def __init__(self, sessions: tuple[ConversationSummary, ...]):
+        super().__init__()
+        self.sessions = sessions
+        self._by_id = {session.session_id: session for session in sessions}
+        self.selected_id = sessions[0].session_id if sessions else None
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal session-modal"):
+            with Horizontal(classes="modal-header"):
+                yield Label("Resume conversation", classes="modal-title")
+                yield Button("X", id="dismiss", classes="modal-close", compact=True)
+            with VerticalScroll(classes="modal-body"):
+                yield Label(
+                    "Saved conversations for the current workspace. Select one to preview it.",
+                    classes="helper",
+                )
+                if self.sessions:
+                    yield Label("Conversation", classes="field-label")
+                    yield Select(
+                        [
+                            (self._option_label(session), session.session_id)
+                            for session in self.sessions
+                        ],
+                        value=self.selected_id,
+                        allow_blank=False,
+                        id="session-select",
+                    )
+                    yield Static("", id="session-preview", classes="session-preview")
+                else:
+                    yield Static(
+                        "No saved conversations exist in this workspace yet.\n"
+                        "Send a message to create one automatically.",
+                        classes="session-empty",
+                    )
+            with Horizontal(classes="modal-actions"):
+                yield Button("Back", id="cancel", compact=True)
+                yield Button(
+                    "Resume",
+                    id="resume",
+                    variant="success",
+                    compact=True,
+                    disabled=not self.sessions,
+                )
+
+    def on_mount(self) -> None:
+        self._update_preview()
+        if self.sessions:
+            self.query_one("#session-select", Select).focus()
+        else:
+            self.query_one("#cancel", Button).focus()
+
+    @on(Select.Changed, "#session-select")
+    def selected(self, event: Select.Changed) -> None:
+        value = str(event.value)
+        if value in self._by_id:
+            self.selected_id = value
+            self._update_preview()
+
+    @on(Button.Pressed)
+    def choose(self, event: Button.Pressed) -> None:
+        if event.button.id in {"cancel", "dismiss"}:
+            self.dismiss(None)
+        elif event.button.id == "resume" and self.selected_id:
+            self.dismiss(self.selected_id)
+
+    def _update_preview(self) -> None:
+        if not self.selected_id or self.selected_id not in self._by_id:
+            return
+        preview = self.query_one("#session-preview", Static)
+        session = self._by_id[self.selected_id]
+        lines = [
+            f"Updated: {self._display_time(session.updated_at)}",
+            f"Messages: {session.message_count} · Tool results: {session.tool_calls}",
+            "",
+        ]
+        for role, content in session.preview:
+            label = "YOU" if role == "user" else "ASSISTANT"
+            lines.append(f"{label}  {content}")
+        preview.update("\n".join(lines))
+
+    @staticmethod
+    def _display_time(value: str) -> str:
+        if not value:
+            return "unknown"
+        try:
+            return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return value[:19].replace("T", " ")
+
+    @classmethod
+    def _option_label(cls, session: ConversationSummary) -> str:
+        return f"{session.title}  ·  {cls._display_time(session.updated_at)}"
+
+
+class ProcessScreen(DismissibleModalScreen):
+    """Visible lifecycle controls for applications launched by the agent."""
+
+    def __init__(self, processes: tuple[dict[str, Any], ...]):
+        super().__init__()
+        self.processes = processes
+        self._by_id = {str(item["process_id"]): item for item in processes}
+        self.selected_id = str(processes[0]["process_id"]) if processes else None
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="modal process-modal"):
+            with Horizontal(classes="modal-header"):
+                yield Label("Running applications", classes="modal-title")
+                yield Button("X", id="dismiss", classes="modal-close", compact=True)
+            with VerticalScroll(classes="modal-body"):
+                yield Label(
+                    "Applications launched in this workspace remain separate from the chat.",
+                    classes="helper",
+                )
+                if self.processes:
+                    yield Label("Application", classes="field-label")
+                    yield Select(
+                        [
+                            (self._option_label(item), str(item["process_id"]))
+                            for item in self.processes
+                        ],
+                        value=self.selected_id,
+                        allow_blank=False,
+                        id="process-select",
+                    )
+                    yield Static("", id="process-preview", classes="process-preview")
+                else:
+                    yield Static(
+                        "No applications have been launched in this workspace.\n"
+                        "Ask Code Agent to run and show the completed program.",
+                        classes="process-empty",
+                    )
+            with Horizontal(classes="modal-actions"):
+                yield Button("Back", id="cancel", compact=True)
+                yield Button(
+                    "Open preview",
+                    id="open",
+                    compact=True,
+                    disabled=not self._can_open(),
+                )
+                yield Button(
+                    "Stop",
+                    id="stop",
+                    variant="error",
+                    compact=True,
+                    disabled=not self._can_stop(),
+                )
+
+    def on_mount(self) -> None:
+        self._update_preview()
+        if self.processes:
+            self.query_one("#process-select", Select).focus()
+        else:
+            self.query_one("#cancel", Button).focus()
+
+    @on(Select.Changed, "#process-select")
+    def selected(self, event: Select.Changed) -> None:
+        value = str(event.value)
+        if value in self._by_id:
+            self.selected_id = value
+            self._update_preview()
+
+    @on(Button.Pressed)
+    def choose(self, event: Button.Pressed) -> None:
+        if event.button.id in {"cancel", "dismiss"}:
+            self.dismiss(None)
+        elif event.button.id in {"open", "stop"} and self.selected_id:
+            self.dismiss(ProcessAction(event.button.id, self.selected_id))
+
+    def _selected(self) -> dict[str, Any] | None:
+        return self._by_id.get(self.selected_id or "")
+
+    def _can_open(self) -> bool:
+        item = self._selected()
+        return bool(item and item.get("status") == "running" and item.get("url"))
+
+    def _can_stop(self) -> bool:
+        item = self._selected()
+        return bool(item and item.get("status") == "running")
+
+    def _update_preview(self) -> None:
+        item = self._selected()
+        if not item:
+            return
+        lines = [
+            f"Status: {str(item.get('status', 'unknown')).upper()}",
+            f"Type: {item.get('mode', 'unknown')} · PID: {item.get('pid', 'unknown')}",
+            f"Command: {item.get('command', '')}",
+            f"Working directory: {item.get('cwd', '.')}",
+        ]
+        if item.get("url"):
+            lines.append(f"URL: {item['url']}")
+        logs = str(item.get("logs") or "").strip()
+        if logs:
+            lines.extend(("", "Recent logs:", logs[-2000:]))
+        self.query_one("#process-preview", Static).update("\n".join(lines))
+        self.query_one("#open", Button).disabled = not self._can_open()
+        self.query_one("#stop", Button).disabled = not self._can_stop()
+
+    @staticmethod
+    def _option_label(item: dict[str, Any]) -> str:
+        return (
+            f"{item.get('name', 'Application')}  ·  "
+            f"{str(item.get('status', 'unknown')).upper()}  ·  {item.get('mode', 'unknown')}"
+        )
 
 
 class WorkspaceScreen(DismissibleModalScreen):

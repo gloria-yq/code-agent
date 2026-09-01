@@ -11,13 +11,15 @@ from .agent import CodingAgent
 from .approval import ApprovalCallback, ApprovalPolicy
 from .config import AgentConfig
 from .context import ContextManager
+from .conversation import ConversationStore
 from .events import AgentEvent
 from .llm import OpenAICompatibleClient
 from .prompt import build_system_prompt
+from .processes import ProcessManager
 from .protocol import ModelReply
 from .security import SecretRedactor
 from .session import SessionLogger
-from .tools import ToolRegistry, build_file_tools, build_shell_tool
+from .tools import ToolRegistry, build_file_tools, build_process_tools, build_shell_tool
 from .workspace import Workspace
 
 
@@ -25,6 +27,7 @@ from .workspace import Workspace
 class AgentRuntime:
     agent: CodingAgent
     redactor: SecretRedactor
+    processes: ProcessManager
 
 
 def create_runtime(
@@ -34,6 +37,7 @@ def create_runtime(
     on_status: Callable[[str, str], None] | None = None,
     on_event: Callable[[AgentEvent], None] | None = None,
     session_log: bool = True,
+    processes: ProcessManager | None = None,
 ) -> AgentRuntime:
     redactor = SecretRedactor([config.api_key])
     workspace = Workspace(config.workspace)
@@ -48,6 +52,10 @@ def create_runtime(
             redact=redactor.text,
         )
     )
+    process_manager = processes or ProcessManager(workspace, redact=redactor.text)
+    process_manager.set_redactor(redactor.text)
+    for tool in build_process_tools(process_manager):
+        registry.register(tool)
     log_path = None
     if session_log:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -80,13 +88,18 @@ def create_runtime(
         ),
         approvals=ApprovalPolicy(config.approval_mode, safe_confirm),
         logger=SessionLogger(log_path, redact=redactor.value),
+        conversations=ConversationStore(
+            config.workspace / ".code-agent" / "conversations",
+            redact=redactor.value,
+            metadata={"provider": config.provider, "model": config.model},
+        ),
         max_turns=config.max_turns,
         max_consecutive_errors=config.max_consecutive_errors,
         on_status=safe_status,
         on_event=safe_event,
     )
     agent.start(build_system_prompt(config.workspace))
-    return AgentRuntime(agent, redactor)
+    return AgentRuntime(agent, redactor, process_manager)
 
 
 def test_model_connection(config: AgentConfig) -> ModelReply:

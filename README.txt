@@ -1,6 +1,6 @@
 项目地址：https://github.com/gloria-yq/code-agent
 
-运行环境：Python 3.10 及以上。克隆仓库后执行“python -m pip install -e .”。进入待处理项目后运行“code-agent --workspace .”启动 TUI；可用 /workspace 或 Ctrl+O 选择其他工作区，切换时会重建本地工具边界并开始新会话。首次使用可在 /connect 中测试并配置 OpenAI 或 DeepSeek，API key 保存到操作系统凭据库，不进入项目或用户配置文件。也可使用环境变量或工作区外的 env 文件。传入“code-agent \"任务\"”执行单次任务，“--classic”启动经典命令行会话。
+运行环境：Python 3.10 及以上。克隆仓库后执行“python -m pip install -e .”。进入待处理项目后运行“code-agent --workspace .”启动 TUI；可用 /workspace 或 Ctrl+O 选择其他工作区，通过 /permissions 随时切换权限模式，通过 /resume 查找并恢复当前工作区的历史会话，通过 /processes 管理由 Agent 启动并展示的终端、Web 或桌面程序。首次使用可在 /connect 中测试并配置 OpenAI 或 DeepSeek，API key 保存到操作系统凭据库，不进入项目或用户配置文件。也可使用环境变量或工作区外的 env 文件。传入“code-agent \"任务\"”执行单次任务，“--classic”启动经典命令行会话。
 
 本项目未使用任何 Agent 框架或 Agent SDK，也不依赖服务端文件或代码执行工具。模型客户端、持续对话历史、工具定义、参数校验、文件与命令本地执行、循环控制、上下文裁剪、错误恢复和 JSONL 会话记录均自行实现。Textual 只用于终端展示，keyring/platformdirs 只用于本地配置与凭据存储。
 

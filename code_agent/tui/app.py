@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from textual import on, work
@@ -13,7 +14,12 @@ from textual.widgets import Label, Static
 
 from ..agent import AgentResult
 from ..config import AgentConfig
-from ..errors import CodeAgentError, ConfigurationError, MissingCredentialError
+from ..errors import (
+    CodeAgentError,
+    ConfigurationError,
+    MissingCredentialError,
+    ProcessError,
+)
 from ..events import AgentEvent
 from ..service import AgentRuntime, create_runtime, test_model_connection
 from ..settings import SettingsService
@@ -23,6 +29,10 @@ from .screens import (
     ConnectScreen,
     ConnectionForm,
     ModelScreen,
+    PermissionScreen,
+    ProcessAction,
+    ProcessScreen,
+    SessionScreen,
     WorkspaceScreen,
 )
 from .widgets import Composer, MessageBlock, ToolCard
@@ -33,6 +43,9 @@ HELP_TEXT = """### Local commands
 - `/connect` configure or replace a provider credential
 - `/models` select the active model
 - `/config` inspect non-secret settings
+- `/permissions` change approval behavior without leaving the TUI
+- `/resume` browse and restore conversations saved in this workspace
+- `/processes` inspect, reopen, or stop applications launched by the agent
 - `/workspace` switch the single local workspace and start a new conversation
 - `/disconnect` remove the active provider credential
 - `/new` clear this conversation
@@ -41,7 +54,8 @@ HELP_TEXT = """### Local commands
 - `/exit` leave Code Agent
 
 Use **Enter** to send, **Shift+Enter** for a new line, **Ctrl+O** to choose a workspace,
-**Esc** or **×** to close a dialog, **Ctrl+C** to stop a running turn, and **Ctrl+Q** to exit.
+**Esc** to stop a running turn or close a dialog, **Ctrl+C** for terminal copy, and
+**Ctrl+Q** to exit.
 """
 
 
@@ -217,6 +231,36 @@ class CodeAgentApp(App[None]):
     .approval-modal { height: 80%; }
     .model-modal { width: 64; height: 22; }
     .config-modal { width: 64; height: 20; }
+    .permission-modal { width: 72; height: 22; }
+    .session-modal { width: 88%; height: 82%; }
+    .process-modal { width: 90%; height: 84%; }
+    .session-preview, .session-empty {
+        height: auto;
+        min-height: 10;
+        margin: 1 0;
+        padding: 1;
+        color: #e2e8f0;
+        background: #020617;
+        border: solid #334155;
+    }
+    .process-preview, .process-empty {
+        height: auto;
+        min-height: 12;
+        margin: 1 0;
+        padding: 1;
+        color: #e2e8f0;
+        background: #020617;
+        border: solid #334155;
+    }
+    .permission-description {
+        height: auto;
+        min-height: 4;
+        margin: 1 0;
+        padding: 1;
+        color: #e2e8f0;
+        background: #020617;
+        border: solid #334155;
+    }
     .workspace-modal { width: 90%; height: 90%; }
     .workspace-body { height: 1fr; }
     .workspace-modal DirectoryTree {
@@ -230,7 +274,7 @@ class CodeAgentApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "cancel_turn", "Stop turn", show=True, priority=True),
+        Binding("escape", "cancel_turn", "Stop turn", show=True),
         Binding("ctrl+q", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+p", "connect", "Connect", show=True),
         Binding("ctrl+o", "workspace", "Workspace", show=True),
@@ -284,7 +328,7 @@ class CodeAgentApp(App[None]):
         self._append_message(
             "system",
             "Ready for a real coding task. Tool actions stay visible and commands require "
-            "approval in the default mode.",
+            "approval in the default mode. Type /resume to reopen a saved conversation.",
         )
         self._load_runtime()
 
@@ -306,11 +350,15 @@ class CodeAgentApp(App[None]):
         self._activate(config)
 
     def _activate(self, config: AgentConfig) -> None:
+        existing_processes = None
+        if self.runtime and self.config and self.config.workspace == config.workspace:
+            existing_processes = getattr(self.runtime, "processes", None)
         runtime = create_runtime(
             config,
             confirm=self._confirm_from_worker,
             on_event=self._receive_agent_event,
             session_log=self.session_log,
+            processes=existing_processes,
         )
         self.workspace = config.workspace
         self.config = config
@@ -337,7 +385,7 @@ class CodeAgentApp(App[None]):
             self._route_command(text)
             return
         if self.busy:
-            self.notify("A turn is already running. Press Ctrl+C to stop it.", severity="warning")
+            self.notify("A turn is already running. Press Esc to stop it.", severity="warning")
             return
         if not self.runtime:
             self.action_connect("Connect a provider before sending a task.")
@@ -347,7 +395,7 @@ class CodeAgentApp(App[None]):
         composer.clear()
         composer.disabled = True
         self.busy = True
-        self._set_status("Working · Ctrl+C stops at the next safe boundary")
+        self._set_status("Working · Esc stops at the next safe boundary")
         self.run_agent(text)
 
     @work(thread=True, group="agent-turn", exclusive=True)
@@ -541,6 +589,124 @@ class CodeAgentApp(App[None]):
             WorkspaceScreen(self.workspace, recent), self._workspace_selected
         )
 
+    def action_permissions(self) -> None:
+        if self.busy:
+            self.notify(
+                "Stop the active turn before changing permissions.", severity="warning"
+            )
+            return
+        current = (
+            self.config.approval_mode
+            if self.config
+            else self.settings.load().approval_mode
+        )
+        self.push_screen(PermissionScreen(current), self._permission_selected)
+
+    def _permission_selected(self, mode: str | None) -> None:
+        if not mode:
+            return
+        current = self.config.approval_mode if self.config else None
+        if mode == current:
+            self.notify(f"Permission mode is already {mode}.")
+            return
+        try:
+            self.settings.select_approval_mode(mode)
+        except ConfigurationError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.overrides["approval_mode"] = mode
+        if self.config and self.runtime:
+            self.config = replace(self.config, approval_mode=mode)
+            self.runtime.agent.approvals.mode = mode
+        self._set_status("Ready")
+        self.notify(f"Permission mode changed to {mode}.")
+
+    def action_sessions(self) -> None:
+        if self.busy or not self.runtime:
+            self.notify(
+                "Connect a provider and stop the active turn before resuming a conversation.",
+                severity="warning",
+            )
+            return
+        try:
+            sessions = self.runtime.agent.list_conversations()
+        except CodeAgentError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.push_screen(SessionScreen(sessions), self._session_selected)
+
+    def action_processes(self) -> None:
+        manager = self._process_manager()
+        if manager is None:
+            self.notify("Connect a provider before managing applications.", severity="warning")
+            return
+        self.push_screen(ProcessScreen(manager.list()), self._process_action)
+
+    def _process_action(self, action: ProcessAction | None) -> None:
+        if action is None:
+            return
+        manager = self._process_manager()
+        if manager is None:
+            return
+        try:
+            if action.action == "open":
+                manager.open(action.process_id)
+                self.notify("Preview opened in the default browser.")
+            elif action.action == "stop":
+                manager.stop(action.process_id)
+                self.notify("Application stopped.")
+        except ProcessError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.push_screen(ProcessScreen(manager.list()), self._process_action)
+
+    def _session_selected(self, session_id: str | None) -> None:
+        if not session_id or not self.runtime:
+            return
+        try:
+            self.runtime.agent.resume(session_id)
+        except CodeAgentError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self._render_restored_history(session_id)
+        self._set_status("Conversation resumed")
+        self.notify("Saved conversation restored.")
+
+    def _render_restored_history(self, session_id: str) -> None:
+        assert self.runtime is not None
+        conversation = self.query_one("#conversation", VerticalScroll)
+        conversation.remove_children()
+        self._tool_cards.clear()
+        self._assistant = None
+        self._assistant_pending = ""
+        self._append_message(
+            "system", f"Resumed conversation `{session_id}` from this workspace."
+        )
+        hidden_tools = 0
+        for message in self.runtime.agent.history()[1:]:
+            role = str(message.get("role", ""))
+            if role == "tool":
+                hidden_tools += 1
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(message.get("content") or "").strip()
+            if not content and role == "assistant" and message.get("tool_calls"):
+                names = [
+                    str(call.get("function", {}).get("name", "unknown"))
+                    for call in message["tool_calls"]
+                    if isinstance(call, dict)
+                ]
+                content = f"[Tool calls retained: {', '.join(names)}]"
+            if content:
+                self._append_message(role, content)
+        if hidden_tools:
+            self._append_message(
+                "system",
+                f"{hidden_tools} previous tool result(s) are retained in model context but "
+                "collapsed from this restored transcript.",
+            )
+
     def _workspace_selected(self, workspace: Path | None) -> None:
         if workspace is None:
             return
@@ -548,6 +714,30 @@ class CodeAgentApp(App[None]):
         if workspace == self.workspace:
             self.notify("This workspace is already active.")
             return
+        manager = self._process_manager()
+        if manager is not None and manager.has_running():
+            self.push_screen(
+                ApprovalScreen(
+                    "switch workspace",
+                    {
+                        "workspace": str(workspace),
+                        "effect": "stop applications running in the current workspace",
+                    },
+                ),
+                lambda allow: self._workspace_process_decided(workspace, allow),
+            )
+            return
+        self._switch_workspace(workspace)
+
+    def _workspace_process_decided(self, workspace: Path, allow: bool | None) -> None:
+        if not allow:
+            return
+        manager = self._process_manager()
+        if manager is not None:
+            manager.stop_all()
+        self._switch_workspace(workspace)
+
+    def _switch_workspace(self, workspace: Path) -> None:
         previous_workspace = self.workspace
         try:
             config = self.settings.resolve(workspace, **self.overrides)
@@ -600,6 +790,12 @@ class CodeAgentApp(App[None]):
             self.action_models()
         elif name == "/config":
             self.action_config()
+        elif name in {"/permissions", "/permission"}:
+            self.action_permissions()
+        elif name in {"/resume", "/sessions", "/history"}:
+            self.action_sessions()
+        elif name in {"/processes", "/apps"}:
+            self.action_processes()
         elif name == "/workspace":
             self.action_workspace()
         elif name == "/new":
@@ -614,7 +810,7 @@ class CodeAgentApp(App[None]):
         elif name == "/disconnect":
             self._disconnect_active()
         elif name in {"/exit", "/quit", "/q"}:
-            self.exit()
+            self.action_quit()
         else:
             self.notify(f"Unknown command: {name}. Use /help.", severity="warning")
         self.query_one(Composer).clear()
@@ -628,6 +824,9 @@ class CodeAgentApp(App[None]):
             if not allow or not self.config:
                 return
             try:
+                manager = self._process_manager()
+                if manager is not None:
+                    manager.stop_all()
                 self.settings.disconnect(self.config.provider)
             except ConfigurationError as exc:
                 self.notify(str(exc), severity="error")
@@ -639,9 +838,39 @@ class CodeAgentApp(App[None]):
             self.notify("Stored provider credential removed.")
 
         self.push_screen(
-            ApprovalScreen("disconnect provider", {"provider": self.config.provider}),
+            ApprovalScreen(
+                "disconnect provider",
+                {
+                    "provider": self.config.provider,
+                    "effect": "stop applications launched in this workspace",
+                },
+            ),
             decided,
         )
+
+    def action_quit(self) -> None:
+        manager = self._process_manager()
+        if manager is None or not manager.has_running():
+            self.exit()
+            return
+        self.push_screen(
+            ApprovalScreen(
+                "exit Code Agent",
+                {"effect": "stop all applications launched in this workspace"},
+            ),
+            self._quit_decided,
+        )
+
+    def _quit_decided(self, allow: bool | None) -> None:
+        if not allow:
+            return
+        manager = self._process_manager()
+        if manager is not None:
+            manager.stop_all()
+        self.exit()
+
+    def _process_manager(self):
+        return getattr(self.runtime, "processes", None) if self.runtime else None
 
     def _clear_conversation(self, notice: str) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)

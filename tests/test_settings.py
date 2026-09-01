@@ -122,6 +122,19 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertEqual(payload["providers"]["deepseek"]["model"], "custom-model")
         self.assertNotIn("stored-secret", json.dumps(payload))
 
+    def test_select_approval_mode_persists_only_public_setting(self):
+        self.store.set("deepseek", "stored-secret")
+
+        settings = self.service.select_approval_mode("suggest")
+
+        self.assertEqual(settings.approval_mode, "suggest")
+        payload = json.loads(self.service.path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["approval_mode"], "suggest")
+        self.assertNotIn("stored-secret", json.dumps(payload))
+
+        with self.assertRaises(ConfigurationError):
+            self.service.select_approval_mode("unsafe")
+
     def test_rejects_string_boolean_in_public_settings(self):
         self.service.path.parent.mkdir(parents=True)
         self.service.path.write_text(
